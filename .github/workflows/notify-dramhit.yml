@@ -1,0 +1,35 @@
+# Tells DRAMHiT that main moved, so its "Bump cpu_simulator submodule" workflow moves the tools/uiCA
+# submodule to this commit right away (instead of at its next 6-hourly run).
+#
+# Secret (this repository: Settings -> Secrets and variables -> Actions):
+#   DRAMHIT_DISPATCH_TOKEN   a token allowed to send repository_dispatch to mars-research/DRAMHiT
+#                            (fine-grained PAT on DRAMHiT with Contents: read and write).
+# Without the secret this workflow does nothing; DRAMHiT still catches up on its schedule.
+name: Notify DRAMHiT
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch to DRAMHiT
+        env:
+          TOKEN: ${{ secrets.DRAMHIT_DISPATCH_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN}" ]; then
+            echo "DRAMHIT_DISPATCH_TOKEN not set: skipping (DRAMHiT bumps on its schedule)"
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/mars-research/DRAMHiT/dispatches \
+            -d "{\"event_type\":\"cpu-simulator-updated\",\"client_payload\":{\"sha\":\"${SHA}\"}}"
+          echo "notified DRAMHiT of ${SHA}"
