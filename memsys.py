@@ -1,8 +1,9 @@
 """Memory-system model for uiCA: non-constant load latency.
 
-Stock uiCA gives every load a fixed latency (an L1 hit). With a memory spec (-memSpec), every load uop
-(including software prefetches, which uiCA represents as load uops without an output register) of an
-instruction that the spec covers asks this model, at dispatch, when its data is ready:
+Stock uiCA gives every load a fixed latency (an L1 hit). In execution-driven mode (-state, see execstate.py)
+every executed instruction instance carries the concrete addresses of its memory operands, and every load uop
+(including software prefetches, which uiCA represents as load uops without an output register) asks this
+model, at dispatch, when its data is ready:
 
     L1 hit                          t + L1 latency
     line already in flight to L1    max(t + L1, fill time)                     (fill-buffer hit / merge)
@@ -22,37 +23,27 @@ Queueing view of the miss path: two multi-server stations in series.
                  and for different times per type.
     L2Q station  nL2Q servers, entered when the FB is granted; service time = the LLC/DRAM trip.
 Latencies are load-to-use latencies of a dependent load (what a pointer chase measures). A software
-prefetch completes (frees its uop) as soon as it has its FB. Option fbFullL2Hint (off by default): an
-L1 miss that finds every FB busy enters the L2Q at once and takes an FB later for the L2 -> L1 step
-only (statistics mark such accesses LLC* / DRAM*). Caches are set-associative LRU; the LLC is
+prefetch completes (frees its uop) as soon as it has its FB.
+
+Fill-buffer busy bypass (fbBusyBypass, OFF by default, experimental; old name fbFullL2Hint): an L1 miss to LLC/DRAM that
+finds every FB busy does not wait for one before going out. It enters the L2Q at once (the hardware sends
+it as an L2 "hardware prefetch"), and then
+    ld, t0   wait for an FB for the L2 -> L1 step and hold it until the data arrives; a prefetcht0
+             completes only once it has its FB
+    t2       needs no FB at all; it is dropped if the L2Q is full too
+A miss that gets an FB at once holds it for the whole trip. With the bypass, uops are never kept back at
+dispatch: requests waiting for an FB wait in the load buffer (bounded by the LSQ). Statistics mark
+bypassed accesses LLC* / DRAM*, dropped prefetches 'drop'. Without the bypass, a load/prefetch that needs
+an FB while all are busy stays in the scheduler and retries. Caches are set-associative LRU; the LLC is
 non-inclusive (fills from DRAM go to L2/L1, L2 victims go to the LLC). Stores are not modelled.
 
-Addresses: uiCA only knows symbolic addresses, so the spec gives every covered memory instruction an
-address pattern over a named region; instance `rnd` (the loop iteration) of instruction `i` accesses
-pattern_i(rnd + shift_i). Patterns:
-    random  {seed}           uniformly random line in the region
-    perm    {seed}           a random bijection over the region's lines: every line once per
-                             lap of size/64 iterations (pointer chase over a cyclic permutation)
-    stride  {stride, start}  start + n * stride (mod region size)
-    same    {offset}         one fixed address
-    trace   {addrs}          explicit byte offsets into the region, cycled
-`shift` (default 0) pairs instructions: a prefetch with shift D and a load with shift 0 and the same
-pattern/seed access the same line D iterations apart, exactly like `prefetch [f(i+D)]; load [f(i)]`.
-
-Spec file (JSON):
-{
-  "config":   "EMR_d760" or {...overrides...} or {"preset": "EMR_d760", ...overrides...},
-  "regions":  {"buf": {"size": 4294967296, "warm": false}},
-  "accesses": {"<instr index>": {"region": "buf", "pattern": "random", "seed": 1, "shift": 0}, ...}
-}
-Instruction indices are positions in uiCA's instruction list (run with -memSpec and a spec without
-"accesses" to have them printed). Instructions not in "accesses" keep stock behaviour (L1 hit).
+Addresses come from the instance (InstrInstance.memAddrs, set by the execution-driven front end); the
+regions of the state file (with their "warm" flags) and the parameters ("config") are passed in.
 """
-import heapq, json, math
+import heapq, math
 from collections import OrderedDict
 
 LINE = 64
-MASK64 = (1 << 64) - 1
 
 # Calibrated on CloudLab d760 (Xeon Gold 6548Y+, Emerald Rapids, 2.5 GHz core/uncore, prefetchers off)
 # from tests/ground_truth.json: chase_l1 / chase_l2 / chase_llc / chase_dram load-to-use latencies.
@@ -65,68 +56,21 @@ PRESETS = {
       'DRAMLat': 316,
       'nFB': 16,               # FB station servers: L1 fill buffers (documented Golden Cove value; tests/mchase*:
                                # demand L1-miss occupancy saturates at ~14, fb_full 85% of cycles)
-      'fbServiceTime': {'ld': 244, 't0': 172, 't2': 122},   # FB station service time per request type, cycles
-                               # (None = until the data arrives). Fitted by tests/fit_fb.py with stall-at-dispatch FB admission (results/fit_fb_stall.json)
-      'nL2Q': 48,              # L2Q station servers: outstanding L2 misses per core (documented 48;
-                               # tests/mix_t2x2: prefetcht2 alone sustains ~41)
-      'fbFullL2Hint': False,   # see the module docstring
+      'fbBusyBypass': False,   # fill-buffer busy bypass (see module docstring). Off: with it, the best nBypassQ (28) gave
+                               # 14.9 % mean error vs 6.7 % without (20 tests, 2026-11-05). Evidence for it
+                               # (tests/results/counter_survey.md):
+                               # with hardware prefetchers off, l2_rqsts.hwpf_miss is 57-85 % of L2 misses and tracks
+                               # the FB-full fraction of cycles in every test; none where FBs are never full
+      'fbServiceTime': {'ld': 244, 't0': 172, 't2': 122},   # FB service time per request type, cycles; None = held
+                               # until the data arrives. Fitted without the bypass (tests/fit_fb.py)
+      'nBypassQ': 28,          # bypassed requests outstanding (each until its data reaches L2); when full, a miss
+                               # waits for an FB instead. Counter survey: 13-18 bypassed misses in flight in
+                               # rand / pf_t0 / pf_t2 / mchase48 (l2_rqsts.hwpf_miss share x offcore occupancy)
+      'nL2Q': 48,              # outstanding L2 misses per core (documented 48; counter survey: at most 44-47 in
+                               # flight; the bypass runs used 44)
       'DRAMLinesPerCycle': 2.08,   # 8 ch DDR5-5200 = 332.8 GB/s at 2.5 GHz; one socket
    },
 }
-
-
-def splitmix64(x):
-   x = (x + 0x9E3779B97F4A7C15) & MASK64
-   x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
-   x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & MASK64
-   return x ^ (x >> 31)
-
-
-class AddressPattern:
-   def __init__(self, spec, region, regionBase):
-      self.kind = spec.get('pattern', 'random')
-      self.shift = int(spec.get('shift', 0))
-      self.seed = int(spec.get('seed', 1))
-      self.size = int(region['size'])
-      self.base = regionBase
-      self.nLines = max(1, self.size // LINE)
-      if self.kind == 'perm':
-         self.bits = self.nLines.bit_length() - 1
-         if (1 << self.bits) != self.nLines:
-            raise ValueError('perm needs a power-of-two number of lines')
-      elif self.kind == 'stride':
-         self.stride, self.start = int(spec['stride']), int(spec.get('start', 0))
-      elif self.kind == 'same':
-         self.offset = int(spec.get('offset', 0))
-      elif self.kind == 'trace':
-         self.addrs = [int(a) for a in spec['addrs']]
-      elif self.kind != 'random':
-         raise ValueError('unknown pattern ' + self.kind)
-
-   def _perm(self, i):
-      # bijection on `bits` bits: multiply by an odd constant / xor-shift right, three rounds
-      b, m = self.bits, self.nLines - 1
-      if b == 0:
-         return 0
-      x = (i ^ self.seed) & m
-      for c in (0x9E3779B97F4A7C15, 0xBF58476D1CE4E5B9, 0x94D049BB133111EB):
-         x = (x * c) & m
-         x ^= x >> max(1, b // 2)
-      return x
-
-   def address(self, rnd):
-      n = rnd + self.shift
-      if self.kind == 'random':
-         off = (splitmix64((self.seed << 40) ^ n) % self.nLines) * LINE
-      elif self.kind == 'perm':
-         off = self._perm(n) * LINE
-      elif self.kind == 'stride':
-         off = (self.start + n * self.stride) % self.size
-      elif self.kind == 'same':
-         off = self.offset
-      else:
-         off = self.addrs[n % len(self.addrs)]
-      return self.base + off
 
 
 class Cache:
@@ -167,9 +111,10 @@ class Cache:
 
 class SlotResource:
    """N identical slots; acquire(t, hold) -> start time >= t of the earliest free slot."""
-   def __init__(self, n):
+   def __init__(self, n, log=None):
       self.n = n
       self.busy = []   # heap of release times
+      self.log = log   # optional list of (start, release) occupancy intervals
 
    def acquire(self, t, releaseFn):
       while self.busy and self.busy[0] <= t:
@@ -178,7 +123,7 @@ class SlotResource:
       if len(self.busy) >= self.n:
          start = max(t, heapq.heappop(self.busy))
       release = releaseFn(start)
-      heapq.heappush(self.busy, release)
+      self.hold(release, start)
       return start, release
 
    def grant(self, t):
@@ -189,8 +134,10 @@ class SlotResource:
          return max(t, heapq.heappop(self.busy))
       return t
 
-   def hold(self, release):
+   def hold(self, release, start=None):
       heapq.heappush(self.busy, release)
+      if self.log is not None and start is not None:
+         self.log.append((start, release))
 
    def isFull(self, t):
       return sum(1 for r in self.busy if r > t) >= self.n
@@ -200,26 +147,25 @@ class SlotResource:
 
 
 class MemSystem:
-   def __init__(self, spec, instructions):
-      cfg = spec.get('config', 'EMR_d760')
+   def __init__(self, config, regions, bases):
+      """config: preset name, or {"preset": name, ...overrides...}; regions: {name: {"size", "warm"}};
+      bases: {name: base address}"""
+      cfg = config or 'EMR_d760'
       if isinstance(cfg, str):
          cfg = {'preset': cfg}
       self.cfg = dict(PRESETS[cfg.get('preset', 'EMR_d760')])
       self.cfg.update({k: v for k, v in cfg.items() if k != 'preset'})
       c = self.cfg
       self.L1, self.L2, self.LLC = Cache(c['L1Size'], c['L1Assoc']), Cache(c['L2Size'], c['L2Assoc']), Cache(c['LLCSize'], c['LLCAssoc'])
-      self.FB, self.L2Q = SlotResource(c['nFB']), SlotResource(c['nL2Q'])
+      self.fbLog = []
+      self.FB, self.L2Q = SlotResource(c['nFB'], self.fbLog), SlotResource(c['nL2Q'])
+      self.bypass = bool(c.get('fbBusyBypass', c.get('fbFullL2Hint', False)))
+      self.BQ = SlotResource(c.get('nBypassQ') or 10**9)
       self.dramNextFree = 0.0
       self.dramServiceTime = 1.0 / c['DRAMLinesPerCycle']
       self.inflightL1 = {}   # line -> cycle the line arrives in L1
       self.inflightL2 = {}   # line -> cycle the line arrives in L2
 
-      regions = spec.get('regions', {})
-      bases = {name: (i + 1) << 44 for i, name in enumerate(regions)}   # disjoint, far apart
-      self.patterns = {}
-      for idx, a in spec.get('accesses', {}).items():
-         instr = instructions[int(idx)]
-         self.patterns[instr] = AddressPattern(a, regions[a['region']], bases[a['region']])
       for name, r in regions.items():
          if r.get('warm'):
             self.warm(bases[name], int(r['size']))
@@ -245,10 +191,19 @@ class MemSystem:
          self._fillL2(line)
          self._fillL1(line)
 
+   # --- addresses -----------------------------------------------------------------------------------
+   # The concrete addresses of an instruction instance (uiCA InstrInstance) come from the execution.
+   def covers(self, instrI):
+      return bool(getattr(instrI, 'memAddrs', None))
+
+   def addressOf(self, instrI):
+      return instrI.memAddrs[0]
+
    # --- timing --------------------------------------------------------------------------------------
-   def needsFB(self, instr, rnd, t):
+   def needsFB(self, instrI, t):
       """would this access allocate a fill buffer if it were dispatched in cycle t?"""
-      line = self.patterns[instr].address(rnd) // LINE
+      instr = instrI.instr
+      line = self.addressOf(instrI) // LINE
       if self.inflightL1.get(line, -1) > t:
          return False                                   # merges with the miss in flight
       if self.L1.contains(line):
@@ -257,12 +212,12 @@ class MemSystem:
       reqType = 'ld' if hint is None else ('t0' if hint in ('t0', 'nta') else 't2')
       return self.cfg['fbServiceTime'].get(reqType) != 0
 
-   def canIssue(self, instr, rnd, t):
+   def canIssue(self, instrI, t):
       """False while the access needs a fill buffer and all of them are busy (the uop must stay in the
       scheduler and retry: the FB station admits nothing while full)"""
-      if self.cfg.get('fbFullL2Hint'):
-         return True
-      return (not self.needsFB(instr, rnd, t)) or (not self.FB.isFull(t))
+      if self.bypass:
+         return True   # with the bypass, waiting requests sit in the load buffer, not the scheduler
+      return (not self.needsFB(instrI, t)) or (not self.FB.isFull(t))
 
    def noteBlocked(self, t):
       self.blockedCycles.add(t)
@@ -271,11 +226,12 @@ class MemSystem:
       """a covered load that got its data from an older store in the store buffer (no cache access)"""
       self.events.append((rnd, 'ld', 'SB', 0, 0, None, t))
 
-   def access(self, instr, rnd, t, isPrefetch, prefetchHint, firstTry=None):
+   def access(self, instrI, t, isPrefetch, prefetchHint, firstTry=None):
       """-> (dataReady, uopDone); dataReady is None for prefetches. firstTry: first cycle the uop was
       blocked for want of an FB (fbWait statistics include that time)."""
       c = self.cfg
-      line = self.patterns[instr].address(rnd) // LINE
+      rnd = instrI.rnd
+      line = self.addressOf(instrI) // LINE
       toL1 = (not isPrefetch) or prefetchHint in ('t0', 'nta')
       reqType = 'ld' if not isPrefetch else ('t0' if toL1 else 't2')
       svc = c['fbServiceTime'].get(reqType)
@@ -293,10 +249,13 @@ class MemSystem:
          l2Arrive = self.inflightL2.get(line, -1)
          if inL2 or l2Arrive > t:
             level = 'L2'
-            fbStart = self.FB.grant(t)
-            ready = max(fbStart + c['L2Lat'], l2Arrive + (c['L2Lat'] - c['L1Lat']))
-            self.FB.hold(fbRelease(fbStart, ready if toL1 else fbStart))
-            fbWait = fbStart - t
+            if toL1:                                      # L2 -> L1 refill: queues for an FB
+               fbStart = self.FB.grant(t)
+               ready = max(fbStart + c['L2Lat'], l2Arrive + (c['L2Lat'] - c['L1Lat']))
+               self.FB.hold(fbRelease(fbStart, ready), fbStart)
+               fbWait = fbStart - t
+            else:                                         # prefetcht1/t2 to a line already in (or on its way to) L2
+               ready = max(t, l2Arrive)
          else:
             inLLC = self.LLC.lookup(line)
             level = 'LLC' if inLLC else 'DRAM'
@@ -312,19 +271,23 @@ class MemSystem:
                qStart, done = self.L2Q.acquire(fbStart, relQ)
                missTime.l2qWait = qStart - fbStart
                return done
-            if holdFB and c.get('fbFullL2Hint') and self.FB.isFull(t):
+            if holdFB and self.bypass and self.FB.isFull(t) and (not self.BQ.isFull(t)):
+               if (not toL1) and self.L2Q.isFull(t):      # prefetcht1/t2 with no FB and no L2Q entry: dropped
+                  self.events.append((rnd, 'pf' + prefetchHint, 'drop', 0, 0, None, t))
+                  return None, t + 1
                arrive = missTime(t)                       # the request leaves for L2/uncore now
-               if toL1:                                   # FB later, for the L2 -> L1 step only
+               self.BQ.hold(arrive - (c['L2Lat'] - c['L1Lat']))   # bypass entry until the data reaches L2
+               if toL1:                                   # FB later, for the L2 -> L1 step; held until the data arrives
                   fbStart, ready = self.FB.acquire(t, lambda st: max(st + c['L2Lat'], arrive))
                   fbWait = fbStart - t
-               else:                                      # prefetcht1/t2: the line only goes to L2
+               else:                                      # prefetcht1/t2: the line only goes to L2, no FB
                   ready = arrive
                level += '*'                               # marks: issued without an FB
             elif holdFB:
                fbStart = self.FB.grant(t)
                ready = missTime(fbStart)
                arrive = ready if toL1 else ready - (c['L2Lat'] - c['L1Lat'])   # at L1 / at L2
-               self.FB.hold(fbRelease(fbStart, arrive))
+               self.FB.hold(fbRelease(fbStart, arrive), fbStart)
                fbWait = fbStart - t
             else:
                fbStart, ready = t, missTime(t)
@@ -355,13 +318,23 @@ class MemSystem:
       out = {'iterations': nIter, 'per_iter': {}, 'avg': {}}
       if ev:
          t0, t1 = min(e[6] for e in ev), max(e[6] for e in ev)
+         # cycles in which all FBs are occupied (from the occupancy intervals; sweep over start/end events)
+         ev2 = sorted([(max(a, t0), 1) for a, b in self.fbLog if b > t0 and a < t1] +
+                      [(min(b, t1), -1) for a, b in self.fbLog if b > t0 and a < t1])
+         occ, last, full = 0, t0, 0
+         for x, d in ev2:
+            if occ >= self.cfg['nFB']:
+               full += x - last
+            occ += d
+            last = x
+         out['avg']['fb_full_frac'] = full / max(1, t1 - t0)   # cf. l1d_pend_miss.fb_full / cycles
          nBlocked = sum(1 for c in self.blockedCycles if t0 <= c <= t1)
-         out['avg']['fb_full_frac'] = nBlocked / max(1, t1 - t0)   # cf. l1d_pend_miss.fb_full / cycles
+         out['avg']['dispatch_blocked_frac'] = nBlocked / max(1, t1 - t0)
          out['window_cycles'] = (t0, t1)
       kinds = sorted({e[1] for e in ev})
       for k in kinds:
          ek = [e for e in ev if e[1] == k]
-         for lvl in ('SB', 'L1', 'FB', 'L2', 'LLC', 'DRAM', 'LLC*', 'DRAM*'):
+         for lvl in ('SB', 'L1', 'FB', 'L2', 'LLC', 'DRAM', 'LLC*', 'DRAM*', 'drop'):
             n = sum(1 for e in ek if e[2] == lvl)
             if n:
                out['per_iter'][f'{k}_{lvl}'] = n / nIter
@@ -371,11 +344,6 @@ class MemSystem:
          if lat:
             out['avg'][f'{k}_latency'] = sum(lat) / len(lat)
       return out
-
-
-def loadSpec(path):
-   with open(path) as f:
-      return json.load(f)
 
 
 def prefetchHintOf(instr):

@@ -23,6 +23,7 @@ from utils import *
 from x64_lib import *
 import json
 import memsys
+execstate = None # imported on demand (-state needs unicorn)
 
 class UopProperties:
    def __init__(self, instr, possiblePorts, inputOperands, outputOperands, latencies, divCycles=0, isLoadUop=False, isStoreAddressUop=False, memAddr=None,
@@ -61,7 +62,7 @@ class Uop:
       self.readyForDispatch = None
       self.dispatched = None
       self.executed = None
-      self.memReady = None # memory model (-memSpec): cycle in which the loaded data is ready
+      self.memReady = None # memory model (-state): cycle in which the loaded data is ready
       self.memDone = None # memory model: earliest cycle in which the uop can finish (e.g., prefetch waiting for a fill buffer)
       self.memFirstTry = None # memory model: first cycle in which the uop was ready but blocked (no free fill buffer)
 
@@ -271,8 +272,8 @@ class Renamer:
                      key = self.getStoreBufferKey(uop.prop.memAddr)
                      self.curStoreBufferEntry = StoreBufferEntry(key)
                      self.storeBufferEntryDict[key] = self.curStoreBufferEntry
-                     if self.memSys is not None and uop.prop.instr in self.memSys.patterns:
-                        addr = self.memSys.patterns[uop.prop.instr].address(uop.instrI.rnd)
+                     if self.memSys is not None and self.memSys.covers(uop.instrI):
+                        addr = self.memSys.addressOf(uop.instrI)
                         self.curStoreBufferEntry.concreteAddress = addr
                         self.concreteStoreDict[addr] = self.curStoreBufferEntry
                   if uop.prop.isStoreAddressUop or uop.prop.isStoreDataUop:
@@ -289,10 +290,10 @@ class Renamer:
                      uop.latReducedDueToFastPtrChasing = latReducedDueToFastPtrChasing(self.uArchConfig, uop.prop.memAddr, baseInstr, indexInstr,
                                                                                        (baseEntry and baseEntry.renamedByElim32BitMove))
                      uop.storeBufferEntry = self.storeBufferEntryDict.get(key, None)
-                     if self.memSys is not None and uop.prop.instr in self.memSys.patterns:
+                     if self.memSys is not None and self.memSys.covers(uop.instrI):
                         # concrete address known: forward only from an older store to the same address that is
                         # still in the store buffer (overrides the abstract-address match)
-                        addr = self.memSys.patterns[uop.prop.instr].address(uop.instrI.rnd)
+                        addr = self.memSys.addressOf(uop.instrI)
                         uop.storeBufferEntry = self.concreteStoreDict.get(addr)
 
                   for inpOp in uop.prop.inputOperands:
@@ -383,8 +384,10 @@ class Renamer:
 
 class FrontEnd:
    def __init__(self, instructions: List[Instr], reorderBuffer, scheduler, uArchConfig: MicroArchConfig,
-                unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd=False):
+                unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd=False, execution=None):
       self.IDQ = deque()
+      self.execution = execution # execstate.Execution (-state) or None
+      self.done = False # -state: the program has ended, no more instructions to fetch
       self.renamer = Renamer(self.IDQ, reorderBuffer, uArchConfig, initPolicy)
       self.reorderBuffer = reorderBuffer
       self.scheduler = scheduler
@@ -413,11 +416,21 @@ class FrontEnd:
       else:
          self.uopSource = 'MITE'
 
+      if execution is not None:
+         traceRounds = TraceRoundGenerator(instructions, execution, self.alignmentOffset)
       if unroll or simpleFrontEnd:
-         self.cacheBlockGenerator = CacheBlockGenerator(instructions, True, self.alignmentOffset)
+         if execution is not None:
+            self.cacheBlockGenerator = (cb for rnd in traceRounds for cb in rnd)
+         else:
+            self.cacheBlockGenerator = CacheBlockGenerator(instructions, True, self.alignmentOffset)
       else:
          self.cacheBlocksForNextRoundGenerator = CacheBlocksForNextRoundGenerator(instructions, self.alignmentOffset)
          cacheBlocksForFirstRound = next(self.cacheBlocksForNextRoundGenerator)
+         if execution is not None:
+            # DSB/LSD decisions from the static code layout (cacheBlocksForFirstRound = every instruction once); the
+            # instructions actually fetched come from the execution
+            self.cacheBlocksForNextRoundGenerator = traceRounds
+            firstTraceRound = self.nextRound()
 
          if self.uArchConfig.DSBBlockSize == 32:
             allBlocksCanBeCached = all(canBeInDSB(block, uArchConfig.DSBBlockSize) for cb in cacheBlocksForFirstRound
@@ -427,17 +440,45 @@ class FrontEnd:
 
          allInstrsCanBeUsedByLSD = all(instrI.instr.canBeUsedByLSD() for cb in cacheBlocksForFirstRound for instrI in cb)
          nUops = sum(len(instrI.uops) for cb in cacheBlocksForFirstRound for instrI in cb)
-         if allBlocksCanBeCached and self.uArchConfig.LSDEnabled and allInstrsCanBeUsedByLSD and (nUops <= self.uArchConfig.IDQWidth):
+         # with an execution, the LSD only applies to a plain loop: the only branch is the last instruction (which jumps
+         # back to the loop head), so every round follows the same path
+         singlePath = (execution is None) or all((not instr.isBranchInstr) or instr.isLastInstr for instr in instructions)
+         if (allBlocksCanBeCached and self.uArchConfig.LSDEnabled and allInstrsCanBeUsedByLSD and (nUops <= self.uArchConfig.IDQWidth)
+               and singlePath):
             self.uopSource = 'LSD'
             self.LSDUnrollCount = self.uArchConfig.LSDUnrolling.get(nUops, 1)
-            for cacheBlock in cacheBlocksForFirstRound + [cb for _ in range(0, self.LSDUnrollCount-1) for cb in next(self.cacheBlocksForNextRoundGenerator)]:
+            if execution is not None:
+               cacheBlocksForFirstRound = firstTraceRound
+            for cacheBlock in cacheBlocksForFirstRound + [cb for _ in range(0, self.LSDUnrollCount-1) for cb in self.nextRound()]:
                self.addNewCacheBlock(cacheBlock)
          else:
             self.findCacheableAddresses(cacheBlocksForFirstRound)
+            if execution is not None:
+               cacheBlocksForFirstRound = firstTraceRound
             for cacheBlock in cacheBlocksForFirstRound:
                self.addNewCacheBlock(cacheBlock)
-            if self.alignmentOffset in self.addressesInDSB:
+            firstAddr = cacheBlocksForFirstRound[0][0].address if cacheBlocksForFirstRound else self.alignmentOffset
+            if firstAddr in self.addressesInDSB:
                self.uopSource = 'DSB'
+
+   def nextRound(self):
+      """cache blocks of the next round; [] once the program has ended (-state)"""
+      if self.done:
+         return []
+      try:
+         return next(self.cacheBlocksForNextRoundGenerator)
+      except StopIteration:
+         self.done = True
+         return []
+
+   def nextCacheBlock(self):
+      if self.done:
+         return []
+      try:
+         return next(self.cacheBlockGenerator)
+      except StopIteration:
+         self.done = True
+         return []
 
    def cycle(self, clock):
       issueUops = []
@@ -472,8 +513,8 @@ class FrontEnd:
          return
 
       if self.uopSource is None:
-         while len(self.IDQ) < self.uArchConfig.issueWidth:
-            for instrI in next(self.cacheBlockGenerator):
+         while len(self.IDQ) < self.uArchConfig.issueWidth and not self.done:
+            for instrI in self.nextCacheBlock():
                self.allGeneratedInstrInstances.append(instrI)
                for lamUop in instrI.uops:
                   self.addStackSyncUop(clock, lamUop.getUnfusedUops()[0])
@@ -482,15 +523,15 @@ class FrontEnd:
       elif self.uopSource == 'LSD':
          if not self.IDQ:
             for _ in range(0, self.LSDUnrollCount):
-               for cacheBlock in next(self.cacheBlocksForNextRoundGenerator):
+               for cacheBlock in self.nextRound():
                   self.addNewCacheBlock(cacheBlock)
       else:
          # add new cache blocks
-         while len(self.DSB.DSBBlockQueue) < 2 and len(self.preDecoder.B16BlockQueue) < 4:
+         while len(self.DSB.DSBBlockQueue) < 2 and len(self.preDecoder.B16BlockQueue) < 4 and not self.done:
             if self.unroll:
-               self.addNewCacheBlock(next(self.cacheBlockGenerator))
+               self.addNewCacheBlock(self.nextCacheBlock())
             else:
-               for cacheBlock in next(self.cacheBlocksForNextRoundGenerator):
+               for cacheBlock in self.nextRound():
                   self.addNewCacheBlock(cacheBlock)
 
          # add new uops to IDQ
@@ -503,7 +544,11 @@ class FrontEnd:
             newUops = [u for _, u in newInstrIUops if u is not None]
             if not self.unroll and newInstrIUops:
                curInstrI = newInstrIUops[-1][0]
-               if curInstrI.instr.isLastDecodedInstr() and (curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr):
+               if self.execution is not None:
+                  # after a taken branch, fetch switches to the DSB if the target is cached there
+                  if getattr(curInstrI, 'taken', False) and curInstrI.fetchNext in self.addressesInDSB:
+                     self.uopSource = 'DSB'
+               elif curInstrI.instr.isLastDecodedInstr() and (curInstrI.instr.isBranchInstr or curInstrI.instr.macroFusedWithNextInstr):
                   if self.alignmentOffset in self.addressesInDSB:
                      self.uopSource = 'DSB'
          elif self.uopSource == 'DSB':
@@ -511,7 +556,9 @@ class FrontEnd:
             newUops = [u for _, u in newInstrIUops if u is not None]
             if newUops and newUops[-1].getUnfusedUops()[-1].prop.isLastUopOfInstr:
                curInstrI = newInstrIUops[-1][0]
-               if curInstrI.instr.isLastDecodedInstr():
+               if getattr(curInstrI, 'fetchNext', None) is not None:
+                  nextAddr = curInstrI.fetchNext
+               elif curInstrI.instr.isLastDecodedInstr():
                   nextAddr = self.alignmentOffset
                else:
                   nextAddr = curInstrI.address + (len(curInstrI.instr.opcode) // 2)
@@ -994,9 +1041,9 @@ class Scheduler:
             while queue:
                entry = heappop(queue)
                cand = entry[1]
-               if (cand.prop.isLoadUop and (cand.prop.instr in self.memSys.patterns)
+               if (cand.prop.isLoadUop and self.memSys.covers(cand.instrI)
                      and not (cand.storeBufferEntry is not None and cand.storeBufferEntry.concreteAddress is not None)
-                     and not self.memSys.canIssue(cand.prop.instr, cand.instrI.rnd, clock)):
+                     and not self.memSys.canIssue(cand.instrI, clock)):
                   self.blockedLoads.add(cand)
                   if cand.memFirstTry is None:
                      cand.memFirstTry = clock
@@ -1018,10 +1065,9 @@ class Scheduler:
          forwarded = (uop.prop.isLoadUop and uop.storeBufferEntry is not None and uop.storeBufferEntry.concreteAddress is not None)
          if self.memSys and forwarded:
             self.memSys.noteForwarded(uop.instrI.rnd, clock)
-         if self.memSys and uop.prop.isLoadUop and (uop.prop.instr in self.memSys.patterns) and not forwarded:
+         if self.memSys and uop.prop.isLoadUop and self.memSys.covers(uop.instrI) and not forwarded:
             hint = memsys.prefetchHintOf(uop.prop.instr)
-            uop.memReady, uop.memDone = self.memSys.access(uop.prop.instr, uop.instrI.rnd, clock, hint is not None, hint,
-                                                           uop.memFirstTry)
+            uop.memReady, uop.memDone = self.memSys.access(uop.instrI, clock, hint is not None, hint, uop.memFirstTry)
          self.uops.remove(uop)
          uopsDispatched.append(uop)
          self.pendingUops.add(uop)
@@ -1507,6 +1553,37 @@ def CacheBlocksForNextRoundGenerator(instructions, alignmentOffset):
          cacheBlocks = []
          prevRnd = curRnd
       cacheBlocks.append(cacheBlock)
+
+
+# Execution-driven front end (-state): per round, the cache blocks of the instructions the program executed in that
+# round, in execution order. A block ends at a 64-byte boundary (as in CacheBlockGenerator) or after a taken branch.
+# Every instance gets memAddrs (concrete addresses of its memory operands), fetchNext (address of the next instruction
+# fetched; for the first instruction of a macro-fused pair, the one after the pair) and taken (it, or its fused
+# branch, redirected fetch).
+def TraceRoundGenerator(instructions, execution, alignmentOffset):
+   offsets = execution.offsets
+   for rnd, records in enumerate(execution.rounds()):
+      instances = []
+      for idx, addrs, nextOff in records:
+         instr = instructions[idx]
+         instrI = InstrInstance(instr, alignmentOffset + offsets[idx], rnd)
+         instrI.memAddrs = addrs
+         instrI.fetchNext = alignmentOffset + nextOff
+         instrI.taken = (nextOff != offsets[idx] + len(instr.opcode) // 2)
+         instances.append(instrI)
+      for a, b in zip(instances, instances[1:]):
+         if a.instr.macroFusedWithNextInstr and b.instr.macroFusedWithPrevInstr:
+            a.fetchNext, a.taken = b.fetchNext, b.taken
+      cacheBlocks, cur = [], []
+      for instrI in instances:
+         cur.append(instrI)
+         end = instrI.address + len(instrI.instr.opcode) // 2
+         if (instrI.address // 64 != end // 64) or (instrI.taken and not instrI.instr.macroFusedWithNextInstr):
+            cacheBlocks.append(cur)
+            cur = []
+      if cur:
+         cacheBlocks.append(cur)
+      yield cacheBlocks
 
 
 def getDSBBlocks(cacheBlock):
@@ -2039,7 +2116,8 @@ def getURL(instrStr):
 
 # Returns the throughput
 def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPolicy, noMicroFusion, noMacroFusion, simpleFrontEnd, minIterations, minCycles,
-                  printDetails=False, traceFile=None, graphFile=None, depGraphFile=None, jsonFile=None, memSpec=None, memJsonFile=None):
+                  printDetails=False, traceFile=None, graphFile=None, depGraphFile=None, jsonFile=None, memJsonFile=None,
+                  state=None, stateDir='.', maxCycles=None):
    instructions = getInstructions(disas, uArchConfig, importlib.import_module('instrData.'+uArchConfig.name+'_data'),
                                   alignmentOffset, noMicroFusion, noMacroFusion)
    if not instructions:
@@ -2050,14 +2128,13 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
    computeUopProperties(instructions)
 
    memSys = None
-   if memSpec is not None:
-      if not memSpec.get('accesses'):
-         print('memory instructions (use these indices in the "accesses" section of the memory spec):')
-         for i, instr in enumerate(instructions):
-            if instr.inputMemOperands or instr.outputMemOperands:
-               print('  {:3d}  {}'.format(i, instr.asm))
-         exit(0)
-      memSys = memsys.MemSystem(memSpec, instructions)
+   execution = None
+   if state is not None:
+      # execution-driven: the emulator runs the code from the initial state; every executed instruction carries its
+      # concrete addresses, and every memory access goes through the memory model
+      execution = execstate.Execution(state, instructions, stateDir)
+      regions = {name: {'size': r.size, 'warm': r.warm} for name, r in execution.regions.items()}
+      memSys = memsys.MemSystem(state.get('config', 'EMR_d760'), regions, execution.bases)
 
    retireQueue = deque()
    lsq = LoadStoreQueue(uArchConfig) if (uArchConfig.LBWidth is not None or uArchConfig.SBWidth is not None) else None
@@ -2066,7 +2143,7 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
 
    perfEvents: Dict[int, Dict[str, int]] = {}
    unroll = (not instructions[-1].isBranchInstr)
-   frontEnd = FrontEnd(instructions, rb, scheduler, uArchConfig, unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd)
+   frontEnd = FrontEnd(instructions, rb, scheduler, uArchConfig, unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd, execution)
    frontEnd.renamer.memSys = memSys
    if lsq is not None:
       lsq.concreteStoreDict = frontEnd.renamer.concreteStoreDict
@@ -2074,6 +2151,7 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
    clock = 0
    rnd = 0
    uopsForRound = []
+   roundRetired = [] # -state: cycle in which the last uop of each round retired
    while True:
       frontEnd.cycle(clock)
       while retireQueue:
@@ -2084,10 +2162,24 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
             if rnd >= len(uopsForRound):
                uopsForRound.append({instr: [] for instr in instructions})
             uopsForRound[rnd][instr].append(fusedUop)
+            if execution is not None:
+               roundRetired.extend([None] * (rnd + 1 - len(roundRetired)))
+               roundRetired[rnd] = clock
             break
-      if rnd >= minIterations and clock > minCycles:
+      if execution is not None:
+         # the program has ended and everything it issued has retired
+         if frontEnd.done and allRetired(frontEnd.allGeneratedInstrInstances):
+            break
+         if maxCycles is not None and clock >= maxCycles:
+            print('stopped after {} cycles (-maxCycles); the program had not finished'.format(clock))
+            break
+      elif rnd >= minIterations and clock > minCycles:
          break
       clock += 1
+
+   if execution is not None:
+      return reportExecution(execution, instructions, frontEnd, memSys, perfEvents, roundRetired, clock, uArchConfig,
+                             printDetails, memJsonFile, state)
 
    lastApplicableInstr = next(instr for instr in instructions if instr.isLastDecodedInstr()) # ignore macro-fused instr.
    lastRelevantRound = max(0, len(uopsForRound) - 2) # last round may be incomplete, thus -2
@@ -2104,25 +2196,6 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
       TP = uopsForRelRound[0][lastApplicableInstr][-1].retired
    else:
       TP = round((uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1), 2)
-
-   if memSys is not None:
-      memSummary = memSys.summary(firstRelevantRound, lastRelevantRound)
-      memSummary['TP'] = TP
-      if 'window_cycles' in memSummary:
-         t0, t1 = memSummary['window_cycles']
-         for evt in ('LBFull', 'SBFull', 'RBFull', 'RSFull'):
-            n = sum(1 for c, e in perfEvents.items() if t0 <= c <= t1 and evt in e)
-            memSummary['avg'][evt + '_frac'] = n / max(1, t1 - t0)   # fraction of cycles in which issue saw it full
-      if printDetails:
-         print('Memory model ({} iterations in the measured window):'.format(memSummary['iterations']))
-         for k, v in sorted(memSummary['per_iter'].items()):
-            print('  {:24s} {:8.3f} per iteration'.format(k, v))
-         for k, v in sorted(memSummary['avg'].items()):
-            print('  {:24s} {:8.2f} {}'.format(k, v, 'of cycles' if k.endswith('_frac') else 'cycles (average)'))
-         print('')
-      if memJsonFile is not None:
-         with open(memJsonFile, 'w') as f:
-            json.dump(memSummary, f, indent=1)
 
    if printDetails or (depGraphFile is not None):
       nodesForInstr, edgesForNode = generateLatencyGraph(instructions, uArchConfig, initPolicy)
@@ -2178,6 +2251,92 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
    return TP
 
 
+def allRetired(instrInstances):
+   for instrI in reversed(instrInstances):
+      if instrI.uops:
+         return all(fUop.retired is not None for lamUop in instrI.uops for fUop in lamUop.getFusedUops())
+   return True
+
+
+# -state: cycles per round over the second half of the rounds (as uiCA's loop TP), program totals, memory model,
+# branch outcomes and the uops table (per round)
+def reportExecution(execution, instructions, frontEnd, memSys, perfEvents, roundRetired, clock, uArchConfig, printDetails,
+                    memJsonFile, state):
+   nRounds = len(roundRetired)
+   if nRounds == 0:
+      print('no instructions executed')
+      return 0
+   first, last = nRounds // 2, nRounds - 1
+   if last > first:
+      TP = round((roundRetired[last] - roundRetired[first]) / (last - first), 2)
+      winFirst = first + 1
+   else:
+      TP, winFirst = roundRetired[0], 0
+   totalCycles = roundRetired[-1] + 1
+
+   instancesForRound = [[] for _ in range(nRounds)]
+   for instrI in frontEnd.allGeneratedInstrInstances:
+      if instrI.rnd < nRounds:
+         instancesForRound[instrI.rnd].append(instrI)
+   nInstrs = execution.nInstructions
+   branchStats = OrderedDict()
+   for instrI in frontEnd.allGeneratedInstrInstances:
+      if instrI.instr.isBranchInstr:
+         st = branchStats.setdefault(instrI.instr, [0, 0])
+         st[0] += 1
+         st[1] += 1 if instrI.taken else 0
+
+   summary = memSys.summary(winFirst, last)
+   summary['TP'] = TP
+   if 'window_cycles' in summary:
+      t0, t1 = summary['window_cycles']
+      for evt in ('LBFull', 'SBFull', 'RBFull', 'RSFull'):
+         n = sum(1 for c, e in perfEvents.items() if t0 <= c <= t1 and evt in e)
+         summary['avg'][evt + '_frac'] = n / max(1, t1 - t0)
+   summary['execution'] = {
+      'rounds': nRounds, 'instructions': nInstrs, 'cycles': totalCycles, 'window_rounds': [winFirst, last],
+      'instructions_per_round': nInstrs / nRounds,
+      'branches': [{'index': instructions.index(i), 'asm': i.asm, 'executed': n, 'taken': t} for i, (n, t) in branchStats.items()],
+      'final_registers': {r: execution.reg(r) for r in list(OrderedDict.fromkeys(
+         ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'rbp', 'rsp'] + ['r' + str(i) for i in range(8, 16)] +
+         [r.lower() for r in state.get('registers', {})]))},
+   }
+   if memJsonFile is not None:
+      with open(memJsonFile, 'w') as f:
+         json.dump(summary, f, indent=1)
+
+   if printDetails:
+      print('Execution: {} rounds, {} instructions ({:.2f} per round), {} cycles in total'.format(
+         nRounds, nInstrs, nInstrs / nRounds, totalCycles))
+      print('Throughput (in cycles per round, rounds {}..{}): {:.2f}'.format(winFirst, last, TP))
+      print('')
+      if branchStats:
+         print('Branches:')
+         for instr, (n, t) in branchStats.items():
+            print('  {:3d}  {:32s} executed {:8d}  taken {:6.1%}'.format(instructions.index(instr), instr.asm, n, t / max(1, n)))
+         print('')
+      print('Memory model ({} rounds in the measured window):'.format(summary['iterations']))
+      for k, v in sorted(summary['per_iter'].items()):
+         print('  {:24s} {:8.3f} per round'.format(k, v))
+      for k, v in sorted(summary['avg'].items()):
+         print('  {:24s} {:8.2f} {}'.format(k, v, 'of cycles' if k.endswith('_frac') else 'cycles (average)'))
+      print('')
+      changed = [r.lower() for r in state.get('registers', {})] + [r for r, v in summary['execution']['final_registers'].items() if v]
+      print('Final registers: ' + ', '.join('{}=0x{:x}'.format(r, summary['execution']['final_registers'][r])
+                                            for r in OrderedDict.fromkeys(changed) if r != 'rsp'))
+      print('')
+      tableLineData = []
+      relRounds = instancesForRound[winFirst:last + 1]
+      for instr in instructions:
+         uops = [[u for instrI in rndInstances if instrI.instr is instr for u in instrI.uops] for rndInstances in relRounds]
+         url = None if isinstance(instr, UnknownInstr) else getURL(instr.instrStr)
+         tableLineData.append(TableLineData(instr.asm, instr, url, uops))
+      print('Uops per round (rounds {}..{}):'.format(winFirst, last))
+      printUopsTable(tableLineData, uArchConfig)
+      print('')
+   return TP
+
+
 # Disassembles a binary and finds for each instruction the corresponding entry in the XML file.
 # With the -iacaMarkers option, only the parts of the code that are between the IACA markers are considered.
 def main():
@@ -2195,11 +2354,12 @@ def main():
    parser.add_argument('-noMicroFusion', help='Variant that does not support micro-fusion', action='store_true')
    parser.add_argument('-noMacroFusion', help='Variant that does not support macro-fusion', action='store_true')
    parser.add_argument('-alignmentOffset', help='Alignment offset (relative to a 64-Byte cache line), or "all"; default: 0', default='0')
-   parser.add_argument('-minIterations', help='Simulate at least this many iterations; default: 10 (200 with -memSpec)', type=int, default=None)
-   parser.add_argument('-minCycles', help='Simulate at least this many cycles; default: 500 (50000 with -memSpec)', type=int, default=None)
-   parser.add_argument('-memSpec', help='Memory-system model: JSON spec with address patterns per memory instruction (see memsys.py); '
-                                        'without it, every load is an L1 hit')
-   parser.add_argument('-memJson', help='With -memSpec: write the memory-model statistics to this JSON file', nargs='?', const='mem.json')
+   parser.add_argument('-minIterations', help='Simulate at least this many iterations; default: 10', type=int, default=10)
+   parser.add_argument('-minCycles', help='Simulate at least this many cycles; default: 500', type=int, default=500)
+   parser.add_argument('-memJson', help='With -state: write the memory-model statistics to this JSON file', nargs='?', const='mem.json')
+   parser.add_argument('-state', help='Execution-driven simulation: JSON with the initial registers and memory contents (see execstate.py); '
+                                      'the program runs from this state until it ends, and every memory access goes through the memory model')
+   parser.add_argument('-maxCycles', help='With -state: stop the simulation after this many cycles', type=int, default=None)
    parser.add_argument('-json', help='JSON output', nargs='?', const='result.json')
    parser.add_argument('-depGraph', help='Output the dependency graph; the format is determined by the filename extension', nargs='?', const='dep.svg')
    parser.add_argument('-initPolicy', help='Initial register state; '
@@ -2209,14 +2369,14 @@ def main():
                                            'default: "diff"', default='diff')
    args = parser.parse_args()
 
-   memSpec = memsys.loadSpec(args.memSpec) if args.memSpec else None
-   if args.minIterations is None:
-      args.minIterations = 200 if memSpec else 10
-   if args.minCycles is None:
-      args.minCycles = 50000 if memSpec else 500
-   if memSpec and (args.arch == 'all' or args.alignmentOffset == 'all'):
-      print('-memSpec needs a single -arch and alignment offset')
-      exit(1)
+   state = None
+   if args.state:
+      global execstate
+      import execstate
+      state = execstate.loadState(args.state)
+      if args.arch == 'all' or args.alignmentOffset == 'all':
+         print('-state needs a single -arch and alignment offset')
+         exit(1)
 
    if not args.arch in list(MicroArchConfigs) + ['all']:
       print('Unsupported microarchitecture')
@@ -2269,7 +2429,8 @@ def main():
          print('    - {:.2f} otherwise\n'.format(sortedTP[-1][0], sortedTP[-1][1]))
    else:
       TP = runSimulation(disas, uArchConfig, int(args.alignmentOffset), args.initPolicy, args.noMicroFusion, args.noMacroFusion, args.simpleFrontEnd,
-                         args.minIterations, args.minCycles, not args.TPonly, args.trace, args.graph, args.depGraph, args.json, memSpec, args.memJson)
+                         args.minIterations, args.minCycles, not args.TPonly, args.trace, args.graph, args.depGraph, args.json, args.memJson,
+                         state, os.path.dirname(os.path.abspath(args.state)) if args.state else '.', args.maxCycles)
       if args.TPonly:
          print('{:.2f}'.format(TP))
 

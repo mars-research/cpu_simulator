@@ -1,0 +1,19 @@
+{
+ "config": "EMR_d760",
+ "registers": {
+  "rax": "buf+0xc5900",
+  "rsi": 4968
+ },
+ "memory": {
+  "buf": {
+   "size": 1048576,
+   "warm": true,
+   "init": [
+    {
+     "kind": "chase",
+     "seed": 1
+    }
+   ]
+  }
+ }
+}

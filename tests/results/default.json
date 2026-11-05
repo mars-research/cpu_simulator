@@ -7,16 +7,62 @@
    "uica": 5.0,
    "error": -0.006161796859471269,
    "model": {
-    "iterations": 4999,
+    "iterations": 7950,
     "per_iter": {
      "ld_L1": 1.0
     },
     "avg": {
+     "fb_full_frac": 0.0,
+     "dispatch_blocked_frac": 0.0,
      "ld_fb_wait": 0.0,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 5.0
+     "ld_latency": 5.0,
+     "LBFull_frac": 0.9767769530758585,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 5.0
+    "window_cycles": [
+     39765,
+     79510
+    ],
+    "TP": 5.0,
+    "execution": {
+     "rounds": 15902,
+     "instructions": 47706,
+     "cycles": 79517,
+     "window_rounds": [
+      7952,
+      15901
+     ],
+     "instructions_per_round": 3.0,
+     "branches": [
+      {
+       "index": 2,
+       "asm": "jnz 0xfffffffffffffffa",
+       "executed": 15902,
+       "taken": 15901
+      }
+     ],
+     "final_registers": {
+      "rax": 17592186057152,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 0,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "chase_l2": {
@@ -24,34 +70,126 @@
    "uica": 16.0,
    "error": -0.006519714374417895,
    "model": {
-    "iterations": 1565,
+    "iterations": 2483,
     "per_iter": {
      "ld_L2": 1.0
     },
     "avg": {
+     "fb_full_frac": 0.0,
+     "dispatch_blocked_frac": 0.0,
      "ld_fb_wait": 0.0,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 16.0
+     "ld_latency": 16.0,
+     "LBFull_frac": 0.925513698630137,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 16.0
+    "window_cycles": [
+     39655,
+     79367
+    ],
+    "TP": 16.0,
+    "execution": {
+     "rounds": 4968,
+     "instructions": 14904,
+     "cycles": 79385,
+     "window_rounds": [
+      2485,
+      4967
+     ],
+     "instructions_per_round": 3.0,
+     "branches": [
+      {
+       "index": 2,
+       "asm": "jnz 0xfffffffffffffffa",
+       "executed": 4968,
+       "taken": 4967
+      }
+     ],
+     "final_registers": {
+      "rax": 17592186250880,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 0,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "chase_llc": {
    "measured": 72.664,
-   "uica": 68.7,
-   "error": -0.05455246064075747,
+   "uica": 70.31,
+   "error": -0.03239568424529338,
    "model": {
-    "iterations": 359,
+    "iterations": 550,
     "per_iter": {
-     "ld_L2": 0.07520891364902507,
-     "ld_LLC": 0.924791086350975
+     "ld_L2": 0.04727272727272727,
+     "ld_LLC": 0.9527272727272728
     },
     "avg": {
+     "fb_full_frac": 0.0,
+     "dispatch_blocked_frac": 0.0,
      "ld_fb_wait": 0.0,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 68.71309192200557
+     "ld_latency": 70.30545454545455,
+     "LBFull_frac": 0.6663816556548776,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 68.7
+    "window_cycles": [
+     38233,
+     76828
+    ],
+    "TP": 70.31,
+    "execution": {
+     "rounds": 1101,
+     "instructions": 3303,
+     "cycles": 76903,
+     "window_rounds": [
+      551,
+      1100
+     ],
+     "instructions_per_round": 3.0,
+     "branches": [
+      {
+       "index": 2,
+       "asm": "jnz 0xfffffffffffffffa",
+       "executed": 1101,
+       "taken": 1100
+      }
+     ],
+     "final_registers": {
+      "rax": 17592200886656,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 0,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "chase_dram": {
@@ -59,73 +197,585 @@
    "uica": 316.0,
    "error": -0.0005914221647316253,
    "model": {
-    "iterations": 100,
+    "iterations": 126,
     "per_iter": {
      "ld_DRAM": 1.0
     },
     "avg": {
+     "fb_full_frac": 0.0,
+     "dispatch_blocked_frac": 0.0,
      "ld_fb_wait": 0.0,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 316.0
+     "ld_latency": 316.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 316.0
+    "window_cycles": [
+     40453,
+     79953
+    ],
+    "TP": 316.0,
+    "execution": {
+     "rounds": 254,
+     "instructions": 762,
+     "cycles": 80271,
+     "window_rounds": [
+      128,
+      253
+     ],
+     "instructions_per_round": 3.0,
+     "branches": [
+      {
+       "index": 2,
+       "asm": "jnz 0xfffffffffffffffa",
+       "executed": 254,
+       "taken": 253
+      }
+     ],
+     "final_registers": {
+      "rax": 17594885516928,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 0,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "rand_dram": {
    "measured": 15.247,
-   "uica": 12.5,
-   "error": -0.1801665901488817,
+   "uica": 15.03,
+   "error": -0.014232307995015403,
    "model": {
-    "iterations": 1975,
+    "iterations": 2623,
     "per_iter": {
-     "ld_DRAM*": 1.0
+     "ld_DRAM": 1.0
     },
     "avg": {
-     "ld_fb_wait": 711.2718987341772,
-     "ld_l2q_wait": 597.5118987341772,
-     "ld_latency": 913.5118987341772
+     "fb_full_frac": 1.0,
+     "dispatch_blocked_frac": 0.9135133792143905,
+     "ld_fb_wait": 394.42356080823487,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 316.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.9154513155606351,
+     "RSFull_frac": 0.0
     },
-    "TP": 12.5
+    "window_cycles": [
+     39879,
+     80128
+    ],
+    "TP": 15.03,
+    "execution": {
+     "rounds": 5247,
+     "instructions": 41976,
+     "cycles": 80446,
+     "window_rounds": [
+      2624,
+      5246
+     ],
+     "instructions_per_round": 8.0,
+     "branches": [
+      {
+       "index": 7,
+       "asm": "jnz 0xffffffffffffffe4",
+       "executed": 5247,
+       "taken": 5246
+      }
+     ],
+     "final_registers": {
+      "rax": 0,
+      "rbx": 0,
+      "rcx": 5247,
+      "rdx": 3841532992,
+      "rsi": 5247,
+      "rdi": 17592186044416,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "pf_t0_dram": {
    "measured": 13.209,
-   "uica": 12.55,
-   "error": -0.04989022636081453,
+   "uica": 11.15,
+   "error": -0.15587856764327346,
    "model": {
-    "iterations": 1967,
+    "iterations": 3028,
     "per_iter": {
-     "ld_FB": 1.0,
-     "pft0_DRAM*": 1.0
+     "ld_L1": 0.2965653896961691,
+     "ld_FB": 0.6149273447820344,
+     "ld_DRAM": 0.08850726552179657,
+     "pft0_FB": 0.08751651254953764,
+     "pft0_DRAM": 0.9124834874504624
     },
     "avg": {
-     "ld_fb_wait": 0.0,
+     "fb_full_frac": 0.9989055521045938,
+     "dispatch_blocked_frac": 0.9884047682432632,
+     "ld_fb_wait": 12.524768824306474,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 262.2796136248094,
-     "pft0_fb_wait": 470.20030503304525,
-     "pft0_l2q_wait": 357.1814946619217
+     "ld_latency": 88.2493394980185,
+     "pft0_fb_wait": 125.24669749009247,
+     "pft0_l2q_wait": 0.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.7739521400893307,
+     "RSFull_frac": 0.0
     },
-    "TP": 12.55
+    "window_cycles": [
+     34128,
+     67935
+    ],
+    "TP": 11.15,
+    "execution": {
+     "rounds": 6057,
+     "instructions": 84798,
+     "cycles": 68208,
+     "window_rounds": [
+      3029,
+      6056
+     ],
+     "instructions_per_round": 14.0,
+     "branches": [
+      {
+       "index": 13,
+       "asm": "jnz 0xffffffffffffffc8",
+       "executed": 6057,
+       "taken": 6056
+      }
+     ],
+     "final_registers": {
+      "rax": 0,
+      "rbx": 0,
+      "rcx": 6057,
+      "rdx": 1627711680,
+      "rsi": 6057,
+      "rdi": 17592186044416,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 6088,
+      "r10": 2704228864,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "pf_t2_dram": {
    "measured": 11.433,
-   "uica": 12.51,
-   "error": 0.0942009971136184,
+   "uica": 8.75,
+   "error": -0.23467156476865214,
    "model": {
-    "iterations": 1975,
+    "iterations": 3498,
     "per_iter": {
      "ld_L2": 1.0,
-     "pft2_DRAM*": 1.0
+     "pft2_DRAM": 1.0
     },
     "avg": {
-     "ld_fb_wait": 274.7407594936709,
+     "fb_full_frac": 0.9916545718432496,
+     "dispatch_blocked_frac": 0.9556409925045232,
+     "ld_fb_wait": 115.46969696969697,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 476.98075949367086,
-     "pft2_fb_wait": 0.0,
-     "pft2_l2q_wait": 970.9407594936708
+     "ld_latency": 19.052601486563752,
+     "pft2_fb_wait": 97.87335620354489,
+     "pft2_l2q_wait": 0.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.7139764797105195,
+     "RSFull_frac": 0.0
     },
-    "TP": 12.51
+    "window_cycles": [
+     31926,
+     62878
+    ],
+    "TP": 8.75,
+    "execution": {
+     "rounds": 6998,
+     "instructions": 97972,
+     "cycles": 62898,
+     "window_rounds": [
+      3500,
+      6997
+     ],
+     "instructions_per_round": 14.0,
+     "branches": [
+      {
+       "index": 13,
+       "asm": "jnz 0xffffffffffffffc8",
+       "executed": 6998,
+       "taken": 6997
+      }
+     ],
+     "final_registers": {
+      "rax": 0,
+      "rbx": 0,
+      "rcx": 6998,
+      "rdx": 2302971328,
+      "rsi": 6998,
+      "rdi": 17592186044416,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 7061,
+      "r10": 152295488,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
+   }
+  },
+  "mix_ld_t2x1_dram": {
+   "measured": 24.775,
+   "uica": 23.25,
+   "error": -0.061553985872855654,
+   "model": {
+    "iterations": 1614,
+    "per_iter": {
+     "ld_DRAM": 1.0,
+     "pft2_DRAM": 1.0
+    },
+    "avg": {
+     "fb_full_frac": 0.9396709323583181,
+     "dispatch_blocked_frac": 0.8991642726560459,
+     "ld_fb_wait": 293.7205700123916,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 316.0,
+     "pft2_fb_wait": 485.1629491945477,
+     "pft2_l2q_wait": 0.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.9126926090363019,
+     "RSFull_frac": 0.0
+    },
+    "window_cycles": [
+     37494,
+     75784
+    ],
+    "TP": 23.25,
+    "execution": {
+     "rounds": 3230,
+     "instructions": 41990,
+     "cycles": 76087,
+     "window_rounds": [
+      1616,
+      3229
+     ],
+     "instructions_per_round": 13.0,
+     "branches": [
+      {
+       "index": 12,
+       "asm": "jnz 0xffffffffffffffc9",
+       "executed": 3230,
+       "taken": 3229
+      }
+     ],
+     "final_registers": {
+      "rax": 0,
+      "rbx": 0,
+      "rcx": 3230,
+      "rdx": 1578965248,
+      "rsi": 3230,
+      "rdi": 17592186044416,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 1746350208,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
+   }
+  },
+  "mix_ld_t2x2_dram": {
+   "measured": 33.672,
+   "uica": 31.51,
+   "error": -0.06420765027322395,
+   "model": {
+    "iterations": 1187,
+    "per_iter": {
+     "ld_DRAM": 1.0,
+     "pft2_DRAM": 2.0
+    },
+    "avg": {
+     "fb_full_frac": 0.8971032946044883,
+     "dispatch_blocked_frac": 0.8568359064141334,
+     "ld_fb_wait": 287.59309182813814,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 316.0185341196293,
+     "pft2_fb_wait": 302.11920808761585,
+     "pft2_l2q_wait": 0.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.9026738819035492,
+     "RSFull_frac": 0.0
+    },
+    "window_cycles": [
+     37354,
+     75052
+    ],
+    "TP": 31.51,
+    "execution": {
+     "rounds": 2376,
+     "instructions": 42768,
+     "cycles": 75366,
+     "window_rounds": [
+      1189,
+      2375
+     ],
+     "instructions_per_round": 18.0,
+     "branches": [
+      {
+       "index": 17,
+       "asm": "jnz 0xffffffffffffffad",
+       "executed": 2376,
+       "taken": 2375
+      }
+     ],
+     "final_registers": {
+      "rax": 0,
+      "rbx": 0,
+      "rcx": 2376,
+      "rdx": 2882388672,
+      "rsi": 2376,
+      "rdi": 17592186044416,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 1203625472,
+      "r10": 2647124800,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
+   }
+  },
+  "mix_t0_t2x1_dram": {
+   "measured": 16.942,
+   "uica": 18.1,
+   "error": 0.06835084405619174,
+   "model": {
+    "iterations": 2360,
+    "per_iter": {
+     "pft0_DRAM": 1.0,
+     "pft2_DRAM": 1.0
+    },
+    "avg": {
+     "fb_full_frac": 0.9992435356684394,
+     "dispatch_blocked_frac": 0.9801026957637997,
+     "pft0_fb_wait": 187.7800847457627,
+     "pft0_l2q_wait": 0.0,
+     "pft2_fb_wait": 337.51906779661016,
+     "pft2_l2q_wait": 0.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.8799514028974876,
+     "RSFull_frac": 0.0
+    },
+    "window_cycles": [
+     43111,
+     86735
+    ],
+    "TP": 18.1,
+    "execution": {
+     "rounds": 4722,
+     "instructions": 61386,
+     "cycles": 86739,
+     "window_rounds": [
+      2362,
+      4721
+     ],
+     "instructions_per_round": 13.0,
+     "branches": [
+      {
+       "index": 12,
+       "asm": "jnz 0xffffffffffffffc8",
+       "executed": 4722,
+       "taken": 4721
+      }
+     ],
+     "final_registers": {
+      "rax": 0,
+      "rbx": 0,
+      "rcx": 4722,
+      "rdx": 3017042432,
+      "rsi": 4722,
+      "rdi": 17592186044416,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 2245936000,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
+   }
+  },
+  "mix_ld_t0x1_dram": {
+   "measured": 25.26,
+   "uica": 26.01,
+   "error": 0.029691211401425166,
+   "model": {
+    "iterations": 1583,
+    "per_iter": {
+     "ld_DRAM": 1.0,
+     "pft0_DRAM": 1.0
+    },
+    "avg": {
+     "fb_full_frac": 0.9524738344433873,
+     "dispatch_blocked_frac": 0.9288534728829686,
+     "ld_fb_wait": 320.83385975994946,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 316.0082122552116,
+     "pft0_fb_wait": 517.9298799747315,
+     "pft0_l2q_wait": 0.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.9259514747859182,
+     "RSFull_frac": 0.0
+    },
+    "window_cycles": [
+     41203,
+     83243
+    ],
+    "TP": 26.01,
+    "execution": {
+     "rounds": 3168,
+     "instructions": 41184,
+     "cycles": 83554,
+     "window_rounds": [
+      1585,
+      3167
+     ],
+     "instructions_per_round": 13.0,
+     "branches": [
+      {
+       "index": 12,
+       "asm": "jnz 0xffffffffffffffc9",
+       "executed": 3168,
+       "taken": 3167
+      }
+     ],
+     "final_registers": {
+      "rax": 0,
+      "rbx": 0,
+      "rcx": 3168,
+      "rdx": 1081401088,
+      "rsi": 3168,
+      "rdi": 17592186044416,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 1988032128,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
+   }
+  },
+  "mix_t2x2_dram": {
+   "measured": 15.131,
+   "uica": 15.18,
+   "error": 0.003238384772982661,
+   "model": {
+    "iterations": 2643,
+    "per_iter": {
+     "pft2_DRAM": 2.0
+    },
+    "avg": {
+     "fb_full_frac": 1.0,
+     "dispatch_blocked_frac": 0.9732118541259192,
+     "pft2_fb_wait": 266.0917517972002,
+     "pft2_l2q_wait": 0.0,
+     "LBFull_frac": 0.0,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.8668267683394816,
+     "RSFull_frac": 0.0
+    },
+    "window_cycles": [
+     40159,
+     80550
+    ],
+    "TP": 15.18,
+    "execution": {
+     "rounds": 5288,
+     "instructions": 68744,
+     "cycles": 80569,
+     "window_rounds": [
+      2645,
+      5287
+     ],
+     "instructions_per_round": 13.0,
+     "branches": [
+      {
+       "index": 12,
+       "asm": "jnz 0xffffffffffffffc8",
+       "executed": 5288,
+       "taken": 5287
+      }
+     ],
+     "final_registers": {
+      "rax": 0,
+      "rbx": 0,
+      "rcx": 5288,
+      "rdx": 2398636544,
+      "rsi": 5288,
+      "rdi": 17592186044416,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 3102892928,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "mchase8_dram": {
@@ -133,16 +783,63 @@
    "uica": 321.0,
    "error": -0.007132561721712505,
    "model": {
-    "iterations": 100,
+    "iterations": 123,
     "per_iter": {
+     "ld_SB": 8.0,
      "ld_DRAM": 8.0
     },
     "avg": {
+     "fb_full_frac": 0.0,
+     "dispatch_blocked_frac": 0.0,
      "ld_fb_wait": 0.0,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 316.0
+     "ld_latency": 316.0,
+     "LBFull_frac": 0.9232210615074717,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 321.0
+    "window_cycles": [
+     36610,
+     79304
+    ],
+    "TP": 321.0,
+    "execution": {
+     "rounds": 248,
+     "instructions": 6448,
+     "cycles": 79624,
+     "window_rounds": [
+      125,
+      247
+     ],
+     "instructions_per_round": 26.0,
+     "branches": [
+      {
+       "index": 25,
+       "asm": "jnz 0xffffffffffffffa7",
+       "executed": 248,
+       "taken": 247
+      }
+     ],
+     "final_registers": {
+      "rax": 35184372088832,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 17593739486208,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "mchase12_dram": {
@@ -150,16 +847,63 @@
    "uica": 321.0,
    "error": -0.026269489777346444,
    "model": {
-    "iterations": 100,
+    "iterations": 121,
     "per_iter": {
+     "ld_SB": 12.0,
      "ld_DRAM": 12.0
     },
     "avg": {
+     "fb_full_frac": 0.0,
+     "dispatch_blocked_frac": 0.0,
      "ld_fb_wait": 0.0,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 316.0
+     "ld_latency": 316.0,
+     "LBFull_frac": 0.9466287312060042,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 321.0
+    "window_cycles": [
+     36932,
+     77703
+    ],
+    "TP": 321.0,
+    "execution": {
+     "rounds": 243,
+     "instructions": 9234,
+     "cycles": 78023,
+     "window_rounds": [
+      122,
+      242
+     ],
+     "instructions_per_round": 38.0,
+     "branches": [
+      {
+       "index": 37,
+       "asm": "jnz 0xffffffffffffff7b",
+       "executed": 243,
+       "taken": 242
+      }
+     ],
+     "final_registers": {
+      "rax": 35184372088832,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 17593502795136,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "mchase16_dram": {
@@ -167,16 +911,63 @@
    "uica": 321.0,
    "error": -0.04998387044266017,
    "model": {
-    "iterations": 100,
+    "iterations": 118,
     "per_iter": {
+     "ld_SB": 16.0,
      "ld_DRAM": 16.0
     },
     "avg": {
+     "fb_full_frac": 0.7132499361756446,
+     "dispatch_blocked_frac": 0.0,
      "ld_fb_wait": 0.0,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 316.0
+     "ld_latency": 316.0,
+     "LBFull_frac": 0.9608884350268062,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 321.0
+    "window_cycles": [
+     36611,
+     75781
+    ],
+    "TP": 321.0,
+    "execution": {
+     "rounds": 237,
+     "instructions": 11850,
+     "cycles": 76101,
+     "window_rounds": [
+      119,
+      236
+     ],
+     "instructions_per_round": 50.0,
+     "branches": [
+      {
+       "index": 49,
+       "asm": "jnz 0xffffffffffffff4f",
+       "executed": 237,
+       "taken": 236
+      }
+     ],
+     "final_registers": {
+      "rax": 35184372088832,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 17595123558400,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "mchase20_dram": {
@@ -184,85 +975,319 @@
    "uica": 321.0,
    "error": -0.09157799411365186,
    "model": {
-    "iterations": 100,
+    "iterations": 113,
     "per_iter": {
-     "ld_DRAM": 16.0,
-     "ld_DRAM*": 4.0
+     "ld_SB": 20.0,
+     "ld_DRAM": 20.0
     },
     "avg": {
-     "ld_fb_wait": 60.0,
+     "fb_full_frac": 0.7925419747484185,
+     "dispatch_blocked_frac": 0.0,
+     "ld_fb_wait": 0.0,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 316.0
+     "ld_latency": 316.0,
+     "LBFull_frac": 0.9650855510770627,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 321.0
+    "window_cycles": [
+     35340,
+     72803
+    ],
+    "TP": 321.0,
+    "execution": {
+     "rounds": 227,
+     "instructions": 14074,
+     "cycles": 73123,
+     "window_rounds": [
+      114,
+      226
+     ],
+     "instructions_per_round": 62.0,
+     "branches": [
+      {
+       "index": 61,
+       "asm": "jnz 0xffffffffffffff0b",
+       "executed": 227,
+       "taken": 226
+      }
+     ],
+     "final_registers": {
+      "rax": 35184372088832,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 17594273665280,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "mchase24_dram": {
    "measured": 371.328,
-   "uica": 321.0,
-   "error": -0.13553516028955526,
+   "uica": 365.58,
+   "error": -0.015479576008272988,
    "model": {
-    "iterations": 100,
+    "iterations": 107,
     "per_iter": {
-     "ld_DRAM*": 24.0
+     "ld_SB": 24.0,
+     "ld_DRAM": 24.0
     },
     "avg": {
-     "ld_fb_wait": 102.0,
+     "fb_full_frac": 1.0,
+     "dispatch_blocked_frac": 0.3997710474578802,
+     "ld_fb_wait": 22.32632398753894,
      "ld_l2q_wait": 0.0,
-     "ld_latency": 316.0
+     "ld_latency": 316.0623052959502,
+     "LBFull_frac": 0.9693402682726526,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 321.0
+    "window_cycles": [
+     38723,
+     78906
+    ],
+    "TP": 365.58,
+    "execution": {
+     "rounds": 216,
+     "instructions": 15984,
+     "cycles": 79226,
+     "window_rounds": [
+      109,
+      215
+     ],
+     "instructions_per_round": 74.0,
+     "branches": [
+      {
+       "index": 73,
+       "asm": "jnz 0xfffffffffffffec7",
+       "executed": 216,
+       "taken": 215
+      }
+     ],
+     "final_registers": {
+      "rax": 35184372088832,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 17594952506880,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "mchase32_dram": {
    "measured": 429.668,
-   "uica": 404.86,
-   "error": -0.05773760205554057,
+   "uica": 488.0,
+   "error": 0.1357606337916717,
    "model": {
-    "iterations": 97,
+    "iterations": 99,
     "per_iter": {
-     "ld_DRAM*": 32.0
+     "ld_SB": 32.0,
+     "ld_DRAM": 32.0
     },
     "avg": {
-     "ld_fb_wait": 197.2036082474227,
-     "ld_l2q_wait": 82.69705342981509,
-     "ld_latency": 399.5808634020619
+     "fb_full_frac": 1.0,
+     "dispatch_blocked_frac": 0.7165816689355304,
+     "ld_fb_wait": 83.20675505050505,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 316.1875,
+     "LBFull_frac": 0.969644634983847,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 404.86
+    "window_cycles": [
+     48161,
+     97378
+    ],
+    "TP": 488.0,
+    "execution": {
+     "rounds": 200,
+     "instructions": 19600,
+     "cycles": 97699,
+     "window_rounds": [
+      101,
+      199
+     ],
+     "instructions_per_round": 98.0,
+     "branches": [
+      {
+       "index": 97,
+       "asm": "jnz 0xfffffffffffffe3f",
+       "executed": 200,
+       "taken": 199
+      }
+     ],
+     "final_registers": {
+      "rax": 35184372088832,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 17593166842624,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "mchase40_dram": {
    "measured": 516.69,
-   "uica": 504.44,
-   "error": -0.02370860670808428,
+   "uica": 603.88,
+   "error": 0.16874721786757996,
    "model": {
-    "iterations": 100,
+    "iterations": 99,
     "per_iter": {
-     "ld_DRAM*": 40.0
+     "ld_SB": 40.0,
+     "ld_DRAM": 40.0
     },
     "avg": {
-     "ld_fb_wait": 298.152,
-     "ld_l2q_wait": 182.28507692307141,
-     "ld_latency": 500.392
+     "fb_full_frac": 0.9806303295126604,
+     "dispatch_blocked_frac": 0.9591573867249279,
+     "ld_fb_wait": 106.4145202020202,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 316.0083333333333,
+     "LBFull_frac": 0.9758694340730113,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 504.44
+    "window_cycles": [
+     61005,
+     122338
+    ],
+    "TP": 603.88,
+    "execution": {
+     "rounds": 200,
+     "instructions": 24400,
+     "cycles": 122660,
+     "window_rounds": [
+      101,
+      199
+     ],
+     "instructions_per_round": 122.0,
+     "branches": [
+      {
+       "index": 121,
+       "asm": "jnz 0xfffffffffffffdb7",
+       "executed": 200,
+       "taken": 199
+      }
+     ],
+     "final_registers": {
+      "rax": 35184372088832,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 17592785729152,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   },
   "mchase48_dram": {
    "measured": 612.757,
-   "uica": 608.78,
-   "error": -0.006490337931675971,
+   "uica": 727.07,
+   "error": 0.18655519235194395,
    "model": {
-    "iterations": 97,
+    "iterations": 99,
     "per_iter": {
-     "ld_DRAM*": 48.0
+     "ld_SB": 48.0,
+     "ld_DRAM": 48.0
     },
     "avg": {
-     "ld_fb_wait": 399.06615120274915,
-     "ld_l2q_wait": 283.341548539513,
-     "ld_latency": 601.4460910652921
+     "fb_full_frac": 0.9757862661878333,
+     "dispatch_blocked_frac": 0.9549053215801502,
+     "ld_fb_wait": 142.4676978114478,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 316.0098905723906,
+     "LBFull_frac": 0.9736233540102296,
+     "SBFull_frac": 0.0,
+     "RBFull_frac": 0.0,
+     "RSFull_frac": 0.0
     },
-    "TP": 608.78
+    "window_cycles": [
+     73444,
+     146956
+    ],
+    "TP": 727.07,
+    "execution": {
+     "rounds": 200,
+     "instructions": 29200,
+     "cycles": 147281,
+     "window_rounds": [
+      101,
+      199
+     ],
+     "instructions_per_round": 146.0,
+     "branches": [
+      {
+       "index": 145,
+       "asm": "jnz 0xfffffffffffffd2f",
+       "executed": 200,
+       "taken": 199
+      }
+     ],
+     "final_registers": {
+      "rax": 35184372088832,
+      "rbx": 0,
+      "rcx": 0,
+      "rdx": 17595281893888,
+      "rsi": 0,
+      "rdi": 0,
+      "rbp": 0,
+      "rsp": 139637976793024,
+      "r8": 0,
+      "r9": 0,
+      "r10": 0,
+      "r11": 0,
+      "r12": 0,
+      "r13": 0,
+      "r14": 0,
+      "r15": 0
+     }
+    }
    }
   }
  }

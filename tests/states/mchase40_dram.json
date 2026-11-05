@@ -1,0 +1,70 @@
+{
+ "config": "EMR_d760",
+ "registers": {
+  "rax": "ptrs",
+  "rsi": 200
+ },
+ "memory": {
+  "buf": {
+   "size": 4294967296,
+   "warm": false,
+   "init": [
+    {
+     "kind": "chase",
+     "seed": 1
+    }
+   ]
+  },
+  "ptrs": {
+   "size": 4096,
+   "warm": true,
+   "init": [
+    {
+     "kind": "values",
+     "data": [
+      "buf+0x16446380",
+      "buf+0x3e9ba6c0",
+      "buf+0x18d20040",
+      "buf+0xd4b00000",
+      "buf+0x4af78380",
+      "buf+0xd4c624c0",
+      "buf+0xc870b300",
+      "buf+0x4e3de8c0",
+      "buf+0x508d59c0",
+      "buf+0xa61e4f80",
+      "buf+0x1c66dfc0",
+      "buf+0x33fe2840",
+      "buf+0xf10bb180",
+      "buf+0xe93ca380",
+      "buf+0xe5e7c680",
+      "buf+0x4fab400",
+      "buf+0xcffdf180",
+      "buf+0x17110b80",
+      "buf+0x2534df40",
+      "buf+0x9fac5000",
+      "buf+0x9c445200",
+      "buf+0x969d3200",
+      "buf+0x4d2ffe40",
+      "buf+0x179e500",
+      "buf+0xc45e8a40",
+      "buf+0xc88e0780",
+      "buf+0x332c3940",
+      "buf+0x68298980",
+      "buf+0x560a9cc0",
+      "buf+0x5b425b80",
+      "buf+0x2d7f0540",
+      "buf+0xb074aac0",
+      "buf+0x84049840",
+      "buf+0xe0bed380",
+      "buf+0x3ca37480",
+      "buf+0xbd64cf40",
+      "buf+0x7fad7ec0",
+      "buf+0x14d6b700",
+      "buf+0x1e28c880",
+      "buf+0x7bdb5840"
+     ]
+    }
+   ]
+  }
+ }
+}

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Runs uiCA (+ memory model) on every test and compares with ground_truth.json.
+"""Runs uiCA execution-driven (-state states/<test>.json) on every test and compares with ground_truth.json.
 
-    python3 run_uica.py [--arch EMR] [--set nFB=25 ...] [--tests ...] [--tag name]
+    ../.venv/bin/python run_uica.py [--arch EMR] [--set nFB=25 ...] [--tests ...] [--tag name]
 
 --set overrides memory-model parameters (memsys.PRESETS keys) for this run; the results go to
-results/<tag>.json and a table is printed (error = predicted / measured - 1).
+results/<tag>.json (default: default) and a table is printed (error = predicted / measured - 1).
+States: make_states.py.
 """
 import argparse, json, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -17,16 +18,17 @@ sys.path.insert(0, str(HERE))
 import measure
 
 
-def run(name, arch, overrides):
-    spec = json.loads((HERE / 'specs' / f'{name}.json').read_text())
+def run(name, arch='EMR', overrides=None):
+    """-> (name, -memJson output of uiCA -state states/<name>.json, or {'error': ...})"""
+    state = json.loads((HERE / 'states' / f'{name}.json').read_text())
     if overrides:
-        spec['config'] = dict({'preset': spec['config']}, **overrides)
+        state['config'] = dict({'preset': state.get('config', 'EMR_d760')}, **overrides)
     with tempfile.TemporaryDirectory() as d:
-        sp, mj = Path(d) / 'spec.json', Path(d) / 'mem.json'
-        sp.write_text(json.dumps(spec))
+        sp, mj = Path(d) / 'state.json', Path(d) / 'mem.json'
+        sp.write_text(json.dumps(state))
         kernel = measure.TESTS[name][0]
         p = subprocess.run([str(PY), str(UICA), str(HERE / 'build' / f'{kernel}.o'), '-arch', arch, '-TPonly',
-                            '-memSpec', str(sp), '-memJson', str(mj)], capture_output=True, text=True)
+                            '-state', str(sp), '-memJson', str(mj)], capture_output=True, text=True)
         if p.returncode:
             return name, {'error': p.stderr[-500:]}
         return name, json.loads(mj.read_text())

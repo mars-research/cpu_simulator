@@ -1,0 +1,7 @@
+{
+ "registers": {"rdi": "a", "rbx": "tab", "rcx": 0, "rsi": 2000, "r8": 0},
+ "memory": {
+  "a":   {"size": "16K", "warm": true, "init": [{"kind": "random", "seed": 11}]},
+  "tab": {"size": "4K",  "warm": true, "init": [{"kind": "random", "seed": 12}]}
+ }
+}

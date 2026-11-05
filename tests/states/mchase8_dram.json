@@ -1,0 +1,38 @@
+{
+ "config": "EMR_d760",
+ "registers": {
+  "rax": "ptrs",
+  "rsi": 248
+ },
+ "memory": {
+  "buf": {
+   "size": 4294967296,
+   "warm": false,
+   "init": [
+    {
+     "kind": "chase",
+     "seed": 1
+    }
+   ]
+  },
+  "ptrs": {
+   "size": 4096,
+   "warm": true,
+   "init": [
+    {
+     "kind": "values",
+     "data": [
+      "buf+0x16446380",
+      "buf+0x1a7d3680",
+      "buf+0x96d09480",
+      "buf+0x19b42e40",
+      "buf+0xa19da840",
+      "buf+0xd3a24f40",
+      "buf+0xd6961780",
+      "buf+0xab0552c0"
+     ]
+    }
+   ]
+  }
+ }
+}

@@ -1,19 +1,22 @@
 # uiCA memory-model tests
 
 Short loop kernels whose memory accesses miss the caches, measured natively on the CloudLab d760
-(Xeon Gold 6548Y+, Emerald Rapids) and simulated with uiCA + the memory model (`../memsys.py`,
-`-memSpec`). The same `kernels/<k>.s` loop body is used for both.
+(Xeon Gold 6548Y+, Emerald Rapids) and simulated execution-driven with uiCA + the memory model
+(`../execstate.py`, `../memsys.py`, `-state`). The same `kernels/<k>.s` loop body is used for both.
 
 ## Workflow
 
-    ./build.sh                      # build/harness (native) and build/<k>.o (uiCA input)
-    python3 measure.py              # native ground truth -> ground_truth.json   (needs the machine set up, below)
-    python3 make_specs.py           # specs/<test>.json, the -memSpec of every test
-    ../.venv/bin/python run_uica.py [--set nFB=16 nL2Q=25 ...] [--tag name]   # predicted vs measured -> results/<tag>.json
+    ../.venv/bin/pip install unicorn  # once: the emulator behind -state
+    ./build.sh                        # build/harness (native) and build/<k>.o (uiCA input)
+    python3 measure.py                # native ground truth -> ground_truth.json   (needs the machine set up, below)
+    ../.venv/bin/python make_states.py   # states/<test>.json: initial registers + memory, set up as the harness does
+    ../.venv/bin/python run_uica.py [--set nFB=16 nL2Q=48 ...] [--tag name]   # predicted vs measured -> results/<tag>.json
+    ../.venv/bin/python test_execstate.py   # functional checks (registers, paths, addresses)
 
 One test by hand:
 
-    ../.venv/bin/python ../uiCA.py build/pf_t0.o -arch EMR -memSpec specs/pf_t0_dram.json
+    ../.venv/bin/python ../uiCA.py build/chase.o -arch EMR -state states/chase_l2.json
+    ../.venv/bin/python ../uiCA.py build/exec_probe.o -arch EMR -state states/exec_probe.json   # after test_execstate.py
 
 Machine state for `measure.py` (it refuses to run otherwise): `scripts/setup.sh` (core 2.5 GHz pinned, no
 turbo, no C-states), uncore 2.5 GHz, hardware prefetchers off
@@ -46,7 +49,7 @@ software-prefetch counts, stalls), each counter group in its own run, counting o
 | pf_t2_dram | 11.4 | |
 | mchase8 .. 48 | 40.4 .. 12.8 per access | plateau ~24.7 misses in flight |
 
-What the counters say about the miss-handling limit (see `memsys.py`, `nFB` / `nL2Q` / `fbFullL2Hint`):
+What the counters say about the miss-handling limit (see `memsys.py`, `nFB` / `nL2Q` / `fbBusyBypass`):
 demand L1-miss (fill buffer) occupancy saturates at ~14 with fb_full ~85 % of cycles (16 FBs), while
 outstanding L2 misses keep growing to ~24 and the per-miss FB hold time drops from 310 to 176 cycles.
 So a miss that finds the FBs full still sends its request out; the per-core limit is ~25 outstanding
@@ -62,13 +65,12 @@ L2 misses, not the 16 FBs.
 - Fix (`uiCA.py` renamer): on EMR, uops.info reports 0 uops for add/sub/inc/dec reg,imm and lea (executed at
   rename); uiCA gave their result no dependency at all. They now alias their input (latency 0).
 
-## Model vs measured (EMR, `run_uica.py`)
+## Model vs measured (EMR, `run_uica.py`, 20 tests)
 
-| model | mean abs error (15 tests) | worst |
+| model | mean abs error | worst |
 |---|---|---|
-| 16 FBs held for the whole miss, 48 L2 misses (`--set nL2Q=48 fbFullL2Hint=0`) | 24.5 % | pf_t2 +82 %, mchase48 +55 % |
-| **default**: 16 FBs, 25 L2 misses, full-FB misses go out without an FB | **5.3 %** | rand_dram −18 %, mchase24 −14 % |
+| **default**: 16 FBs held for a per-request-type service time (`fbServiceTime` ld 244 / t0 172 / t2 122), 48 L2 misses, a miss waits in the scheduler while all FBs are busy | **6.8 %** | pf_t2 −24 %, mchase48 +19 % |
+| default + fill-buffer busy bypass (`--set fbBusyBypass=1 nBypassQ=28`; off by default; measured with the former address-pattern input) | 14.9 % | |
 
-Open: rand_dram runs at 15.2 cycles/iter natively but the model (and mchase48, 12.8/access) say ~12.5;
-the measured knee of the MLP curve is gradual (latency rises from 316 to ~370 cycles by K = 24) while
-the model's is sharp; LLC latency under-predicted by 5 % (non-inclusive LLC fill policy is simplified).
+Open: prefetch then load of the same line (pf_t2 −24 %, pf_t0 −16 %); the measured knee of the MLP curve
+is gradual (mchase20 −9 %, mchase48 +19 %); LLC latency under-predicted by 3-5 %.
