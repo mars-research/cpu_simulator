@@ -1,0 +1,42 @@
+{
+ "arch": "EMR",
+ "overrides": {},
+ "tests": {
+  "mix_t2x2_dram": {
+   "measured": 15.131,
+   "uica": 37.8,
+   "error": 1.49818253915802,
+   "model": {
+    "iterations": 655,
+    "per_iter": {
+     "pft2_DRAM": 2.0
+    },
+    "avg": {
+     "pft2_fb_wait": 1615.5740458015266,
+     "pft2_l2q_wait": 0.0
+    },
+    "TP": 37.8
+   }
+  },
+  "mix_ld_t2x2_dram": {
+   "measured": 36.977,
+   "uica": 58.18,
+   "error": 0.5734104984179356,
+   "model": {
+    "iterations": 430,
+    "per_iter": {
+     "ld_DRAM": 1.0,
+     "pft2_DRAM": 2.0
+    },
+    "avg": {
+     "ld_fb_wait": 1441.9744186046512,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 1757.9744186046512,
+     "pft2_fb_wait": 1440.6267441860466,
+     "pft2_l2q_wait": 0.0
+    },
+    "TP": 58.18
+   }
+  }
+ }
+}

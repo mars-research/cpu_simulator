@@ -1,0 +1,143 @@
+{
+ "config": "EMR_d760",
+ "regions": {
+  "buf": {
+   "size": 4294967296,
+   "warm": false
+  },
+  "ptrs": {
+   "size": 4096,
+   "warm": true
+  }
+ },
+ "accesses": {
+  "0": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 0
+  },
+  "1": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1,
+   "shift": 0
+  },
+  "2": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 0
+  },
+  "3": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 8
+  },
+  "4": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1,
+   "shift": 8388608
+  },
+  "5": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 8
+  },
+  "6": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 16
+  },
+  "7": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1,
+   "shift": 16777216
+  },
+  "8": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 16
+  },
+  "9": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 24
+  },
+  "10": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1,
+   "shift": 25165824
+  },
+  "11": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 24
+  },
+  "12": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 32
+  },
+  "13": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1,
+   "shift": 33554432
+  },
+  "14": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 32
+  },
+  "15": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 40
+  },
+  "16": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1,
+   "shift": 41943040
+  },
+  "17": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 40
+  },
+  "18": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 48
+  },
+  "19": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1,
+   "shift": 50331648
+  },
+  "20": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 48
+  },
+  "21": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 56
+  },
+  "22": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1,
+   "shift": 58720256
+  },
+  "23": {
+   "region": "ptrs",
+   "pattern": "same",
+   "offset": 56
+  }
+ }
+}

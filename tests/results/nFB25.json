@@ -1,0 +1,270 @@
+{
+ "arch": "EMR",
+ "overrides": {
+  "nFB": 25
+ },
+ "tests": {
+  "chase_l1": {
+   "measured": 5.031,
+   "uica": 5.0,
+   "error": -0.006161796859471269,
+   "model": {
+    "iterations": 4999,
+    "per_iter": {
+     "ld_L1": 1.0
+    },
+    "avg": {
+     "ld_fb_wait": 0.0,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 5.0
+    },
+    "TP": 5.0
+   }
+  },
+  "chase_l2": {
+   "measured": 16.105,
+   "uica": 16.0,
+   "error": -0.006519714374417895,
+   "model": {
+    "iterations": 1565,
+    "per_iter": {
+     "ld_L2": 1.0
+    },
+    "avg": {
+     "ld_fb_wait": 0.0,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 16.0
+    },
+    "TP": 16.0
+   }
+  },
+  "chase_llc": {
+   "measured": 72.664,
+   "uica": 68.7,
+   "error": -0.05455246064075747,
+   "model": {
+    "iterations": 359,
+    "per_iter": {
+     "ld_L2": 0.07520891364902507,
+     "ld_LLC": 0.924791086350975
+    },
+    "avg": {
+     "ld_fb_wait": 0.0,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 68.71309192200557
+    },
+    "TP": 68.7
+   }
+  },
+  "chase_dram": {
+   "measured": 316.187,
+   "uica": 316.0,
+   "error": -0.0005914221647316253,
+   "model": {
+    "iterations": 100,
+    "per_iter": {
+     "ld_DRAM": 1.0
+    },
+    "avg": {
+     "ld_fb_wait": 0.0,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 316.0
+    },
+    "TP": 316.0
+   }
+  },
+  "rand_dram": {
+   "measured": 15.247,
+   "uica": 12.5,
+   "error": -0.1801665901488817,
+   "model": {
+    "iterations": 1975,
+    "per_iter": {
+     "ld_DRAM": 1.0
+    },
+    "avg": {
+     "ld_fb_wait": 597.5118987341772,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 913.5118987341772
+    },
+    "TP": 12.5
+   }
+  },
+  "pf_t0_dram": {
+   "measured": 13.209,
+   "uica": 12.55,
+   "error": -0.04989022636081453,
+   "model": {
+    "iterations": 1967,
+    "per_iter": {
+     "ld_FB": 1.0,
+     "pft0_DRAM": 1.0
+    },
+    "avg": {
+     "ld_fb_wait": 0.0,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 376.4361972547026,
+     "pft0_fb_wait": 470.88561260803255,
+     "pft0_l2q_wait": 0.0
+    },
+    "TP": 12.55
+   }
+  },
+  "pf_t2_dram": {
+   "measured": 11.433,
+   "uica": 13.29,
+   "error": 0.16242456048281295,
+   "model": {
+    "iterations": 1857,
+    "per_iter": {
+     "ld_L2": 1.0,
+     "pft2_DRAM": 1.0
+    },
+    "avg": {
+     "ld_fb_wait": 501.7108239095315,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 517.7108239095315,
+     "pft2_fb_wait": 492.1362412493269,
+     "pft2_l2q_wait": 0.0
+    },
+    "TP": 13.29
+   }
+  },
+  "mchase8_dram": {
+   "measured": 323.306,
+   "uica": 100.62,
+   "error": -0.6887778142069741,
+   "model": {
+    "iterations": 246,
+    "per_iter": {
+     "ld_DRAM": 8.0
+    },
+    "avg": {
+     "ld_fb_wait": 1729.4577568011523,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 2045.45775680116
+    },
+    "TP": 100.62
+   }
+  },
+  "mchase12_dram": {
+   "measured": 329.66,
+   "uica": 151.23,
+   "error": -0.5412546259782807,
+   "model": {
+    "iterations": 164,
+    "per_iter": {
+     "ld_DRAM": 12.0
+    },
+    "avg": {
+     "ld_fb_wait": 1759.8002267042202,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 2075.800226704229
+    },
+    "TP": 151.23
+   }
+  },
+  "mchase16_dram": {
+   "measured": 337.889,
+   "uica": 201.15,
+   "error": -0.4046861543287884,
+   "model": {
+    "iterations": 122,
+    "per_iter": {
+     "ld_DRAM": 16.0
+    },
+    "avg": {
+     "ld_fb_wait": 1771.1903077711513,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 2087.1903077711595
+    },
+    "TP": 201.15
+   }
+  },
+  "mchase20_dram": {
+   "measured": 353.36,
+   "uica": 252.8,
+   "error": -0.28458229567579807,
+   "model": {
+    "iterations": 96,
+    "per_iter": {
+     "ld_DRAM": 20.0
+    },
+    "avg": {
+     "ld_fb_wait": 1787.716336137845,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 2103.7163361378525
+    },
+    "TP": 252.8
+   }
+  },
+  "mchase24_dram": {
+   "measured": 371.328,
+   "uica": 303.24,
+   "error": -0.18336349534643215,
+   "model": {
+    "iterations": 100,
+    "per_iter": {
+     "ld_DRAM": 24.0
+    },
+    "avg": {
+     "ld_fb_wait": 1787.4859294872122,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 2103.4859294872176
+    },
+    "TP": 303.24
+   }
+  },
+  "mchase32_dram": {
+   "measured": 429.668,
+   "uica": 402.3,
+   "error": -0.06369569062625091,
+   "model": {
+    "iterations": 100,
+    "per_iter": {
+     "ld_DRAM": 32.0
+    },
+    "avg": {
+     "ld_fb_wait": 1797.866826923124,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 2113.8668269231284
+    },
+    "TP": 402.3
+   }
+  },
+  "mchase40_dram": {
+   "measured": 516.69,
+   "uica": 504.38,
+   "error": -0.02382473049604228,
+   "model": {
+    "iterations": 100,
+    "per_iter": {
+     "ld_DRAM": 40.0
+    },
+    "avg": {
+     "ld_fb_wait": 1796.89307692313,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 2112.893076923131
+    },
+    "TP": 504.38
+   }
+  },
+  "mchase48_dram": {
+   "measured": 612.757,
+   "uica": 609.29,
+   "error": -0.005658034098345643,
+   "model": {
+    "iterations": 99,
+    "per_iter": {
+     "ld_DRAM": 48.0
+    },
+    "avg": {
+     "ld_fb_wait": 1799.9586692243447,
+     "ld_l2q_wait": 0.0,
+     "ld_latency": 2115.9586692242983
+    },
+    "TP": 609.29
+   }
+  }
+ }
+}

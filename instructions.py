@@ -204,7 +204,11 @@ def getInstructions(disas, uArchConfig: MicroArchConfig, archData, alignmentOffs
 
             latencies = dict()
             for inpN, inpR in instrInputRegOperands:
-               if (not mayBeEliminated) and all(latData.get((inpN, o), 1) == 0 for o in outputOperandsDict.keys()): # e.g., zero idioms
+               # e.g., zero idioms. Not for instructions that write memory: from ICL on, uops.info reports latency 0 from
+               # the data register of a store (e.g. MOV (M64, R64)) to memory, and dropping the operand removed the
+               # store-data dependency, so values passed through memory (store -> load) did not depend on anything.
+               if ((not mayBeEliminated) and (not instrOutputMemOperands)
+                     and all(latData.get((inpN, o), 1) == 0 for o in outputOperandsDict.keys())):
                   continue
                regOp = RegOperand(inpR)
                inputRegOperands.append(regOp)

@@ -7,7 +7,7 @@ class MicroArchConfig:
                 preDecodeWidth=5, preDecodeBlockSize=16, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True,
                 high8RenamedSeparately=True, movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4,
                 moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True,
-                slow256BitMemAcc=False, DSBBlockSize=32, simplePortAssignment=False):
+                slow256BitMemAcc=False, DSBBlockSize=32, simplePortAssignment=False, LBWidth=None, SBWidth=None, storeCommitWidth=1):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
       self.IQWidth = IQWidth # width of the instruction queue
@@ -40,6 +40,9 @@ class MicroArchConfig:
       self.slow256BitMemAcc = slow256BitMemAcc # 256-bit memory load/store uops block the load/store units twice
       self.DSBBlockSize = DSBBlockSize
       self.simplePortAssignment = simplePortAssignment # assign ports with equal probability
+      self.LBWidth = LBWidth # load buffer entries (None: not modelled); allocated at issue, freed at retirement
+      self.SBWidth = SBWidth # store buffer entries (None: not modelled); freed after retirement, when the store is written to L1
+      self.storeCommitWidth = storeCommitWidth # retired stores written to L1 per cycle
 
 MicroArchConfigs: Dict[str, MicroArchConfig] = {}
 
@@ -167,6 +170,30 @@ MicroArchConfigs['TGL'].XEDName = 'TIGER_LAKE'
 MicroArchConfigs['RKL'] = copy.deepcopy(MicroArchConfigs['ICL'])
 MicroArchConfigs['RKL'].name = 'RKL'
 MicroArchConfigs['RKL'].moveEliminationGPRSlots = 'unlimited'
+
+# Emerald Rapids (Raptor Cove = Golden Cove core; e.g. Xeon Gold 6548Y+, CloudLab d760). Added for the DRAMHiT
+# memory-system work; derived from ICL with Golden Cove front-end/back-end sizes (Intel optimization manual,
+# chipsandcheese). Instruction data: uops.info "EMR" measurements. Ports use uops.info's names: ALU 0,1,5,6,B;
+# loads 2,3,A; store address 7,8; store data 4,9. L1 load-to-use is 5 cycles even for pointer chasing
+# (measured 5.03 cycles/iter on d760, tests/chase_l1), hence fastPointerChasing = False.
+MicroArchConfigs['EMR'] = copy.deepcopy(MicroArchConfigs['ICL'])
+MicroArchConfigs['EMR'].name = 'EMR'
+MicroArchConfigs['EMR'].XEDName = 'SAPPHIRE_RAPIDS'
+MicroArchConfigs['EMR'].IQWidth = 25        # ? (unchanged from ICL)
+MicroArchConfigs['EMR'].DSBWidth = 8
+MicroArchConfigs['EMR'].IDQWidth = 144      # one thread active
+MicroArchConfigs['EMR'].issueWidth = 6
+MicroArchConfigs['EMR'].RBWidth = 512
+MicroArchConfigs['EMR'].RSWidth = 205       # 97 ALU + 70 load + 38 store scheduler entries
+MicroArchConfigs['EMR'].retireWidth = 8
+MicroArchConfigs['EMR'].nDecoders = 6
+MicroArchConfigs['EMR'].preDecodeWidth = 6
+MicroArchConfigs['EMR'].preDecodeBlockSize = 32
+MicroArchConfigs['EMR'].moveEliminationGPRSlots = 'unlimited'
+MicroArchConfigs['EMR'].fastPointerChasing = False
+MicroArchConfigs['EMR'].LBWidth = 192       # Golden Cove load buffer
+MicroArchConfigs['EMR'].SBWidth = 114       # Golden Cove store buffer
+MicroArchConfigs['EMR'].storeCommitWidth = 2
 
 MicroArchConfigs['CLX_SimplePorts'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_SimplePorts'].simplePortAssignment = True

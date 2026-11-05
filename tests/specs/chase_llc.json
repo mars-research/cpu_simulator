@@ -1,0 +1,16 @@
+{
+ "config": "EMR_d760",
+ "regions": {
+  "buf": {
+   "size": 33554432,
+   "warm": true
+  }
+ },
+ "accesses": {
+  "0": {
+   "region": "buf",
+   "pattern": "perm",
+   "seed": 1
+  }
+ }
+}

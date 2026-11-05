@@ -1,0 +1,122 @@
+{
+ "best": {
+  "ld": 244,
+  "t0": 172,
+  "t2": 122,
+  "nL2Q": 48
+ },
+ "fit_mean_abs_err": 0.09064559380467294,
+ "validate_mean_abs_err": 0.05584445139541494,
+ "trajectory": [
+  {
+   "params": {
+    "ld": 244,
+    "t0": 165,
+    "t2": 122,
+    "nL2Q": 48
+   },
+   "err": 0.09284410313939845
+  },
+  {
+   "params": {
+    "ld": 244,
+    "t0": 172,
+    "t2": 122,
+    "nL2Q": 48
+   },
+   "err": 0.09064559380467294
+  }
+ ],
+ "tests": {
+  "rand_dram": {
+   "measured": 15.247,
+   "uica": 15.15,
+   "error": -0.00636190726044461
+  },
+  "pf_t0_dram": {
+   "measured": 13.209,
+   "uica": 11.12,
+   "error": -0.15814974638504053
+  },
+  "pf_t2_dram": {
+   "measured": 11.433,
+   "uica": 8.88,
+   "error": -0.2233009708737863
+  },
+  "mix_t2x2_dram": {
+   "measured": 15.131,
+   "uica": 15.16,
+   "error": 0.0019165950697244138
+  },
+  "mix_ld_t2x1_dram": {
+   "measured": 24.69,
+   "uica": 23.96,
+   "error": -0.029566626164439058
+  },
+  "mix_ld_t2x2_dram": {
+   "measured": 36.977,
+   "uica": 31.66,
+   "error": -0.14379208697298318
+  },
+  "mix_t0_t2x1_dram": {
+   "measured": 16.942,
+   "uica": 18.45,
+   "error": 0.08900956203517874
+  },
+  "mix_ld_t0x1_dram": {
+   "measured": 25.26,
+   "uica": 25.34,
+   "error": 0.003167062549485289
+  },
+  "mchase24_dram": {
+   "measured": 371.328,
+   "uica": 365.57,
+   "error": -0.015506506377111262
+  },
+  "mchase32_dram": {
+   "measured": 429.668,
+   "uica": 488.0,
+   "error": 0.1357606337916717
+  },
+  "mchase48_dram": {
+   "measured": 612.757,
+   "uica": 729.53,
+   "error": 0.19056983437153718
+  },
+  "chase_l2": {
+   "measured": 16.105,
+   "uica": 16.0,
+   "error": -0.006519714374417895
+  },
+  "chase_llc": {
+   "measured": 72.664,
+   "uica": 68.7,
+   "error": -0.05455246064075747
+  },
+  "chase_dram": {
+   "measured": 316.187,
+   "uica": 316.0,
+   "error": -0.0005914221647316253
+  },
+  "mchase8_dram": {
+   "measured": 323.306,
+   "uica": 321.0,
+   "error": -0.007132561721712505
+  },
+  "mchase16_dram": {
+   "measured": 337.889,
+   "uica": 321.0,
+   "error": -0.04998387044266017
+  },
+  "mchase20_dram": {
+   "measured": 353.36,
+   "uica": 321.0,
+   "error": -0.09157799411365186
+  },
+  "mchase40_dram": {
+   "measured": 516.69,
+   "uica": 609.98,
+   "error": 0.18055313630997305
+  }
+ }
+}

@@ -21,6 +21,8 @@ from instructions import *
 from microArchConfigs import MicroArchConfig, MicroArchConfigs
 from utils import *
 from x64_lib import *
+import json
+import memsys
 
 class UopProperties:
    def __init__(self, instr, possiblePorts, inputOperands, outputOperands, latencies, divCycles=0, isLoadUop=False, isStoreAddressUop=False, memAddr=None,
@@ -59,6 +61,9 @@ class Uop:
       self.readyForDispatch = None
       self.dispatched = None
       self.executed = None
+      self.memReady = None # memory model (-memSpec): cycle in which the loaded data is ready
+      self.memDone = None # memory model: earliest cycle in which the uop can finish (e.g., prefetch waiting for a fill buffer)
+      self.memFirstTry = None # memory model: first cycle in which the uop was ready but blocked (no free fill buffer)
 
    def getUnfusedUops(self):
       return [self]
@@ -107,6 +112,7 @@ class StackSyncUop(Uop):
 class StoreBufferEntry:
    def __init__(self, abstractAddress):
       self.abstractAddress = abstractAddress # (base, index, scale, disp)
+      self.concreteAddress = None # memory model: the store's address in this iteration, if the spec covers the store
       self.uops = [] # uops that write to this entry
       self.addressReadyCycle = None
       self.dataReadyCycle = None
@@ -136,6 +142,8 @@ class RenamedOperand:
          self.__ready = max(self.uop.dispatched + lat, memReady)
       else:
          self.__ready = self.uop.dispatched + lat
+         if self.uop.memReady is not None:
+            self.__ready = max(self.__ready, self.uop.memReady)
 
       return self.__ready
 
@@ -166,6 +174,8 @@ class Renamer:
 
       self.curStoreBufferEntry = None
       self.storeBufferEntryDict = {}
+      self.memSys = None # memory model; set by runSimulation
+      self.concreteStoreDict = {} # memory model: concrete address -> youngest store (StoreBufferEntry) not yet written to L1
 
       self.lastRegMergeIssued = None # last uop for which register merge uops were issued
 
@@ -261,6 +271,10 @@ class Renamer:
                      key = self.getStoreBufferKey(uop.prop.memAddr)
                      self.curStoreBufferEntry = StoreBufferEntry(key)
                      self.storeBufferEntryDict[key] = self.curStoreBufferEntry
+                     if self.memSys is not None and uop.prop.instr in self.memSys.patterns:
+                        addr = self.memSys.patterns[uop.prop.instr].address(uop.instrI.rnd)
+                        self.curStoreBufferEntry.concreteAddress = addr
+                        self.concreteStoreDict[addr] = self.curStoreBufferEntry
                   if uop.prop.isStoreAddressUop or uop.prop.isStoreDataUop:
                      uop.storeBufferEntry = self.curStoreBufferEntry
                      self.curStoreBufferEntry.uops.append(uop)
@@ -275,6 +289,11 @@ class Renamer:
                      uop.latReducedDueToFastPtrChasing = latReducedDueToFastPtrChasing(self.uArchConfig, uop.prop.memAddr, baseInstr, indexInstr,
                                                                                        (baseEntry and baseEntry.renamedByElim32BitMove))
                      uop.storeBufferEntry = self.storeBufferEntryDict.get(key, None)
+                     if self.memSys is not None and uop.prop.instr in self.memSys.patterns:
+                        # concrete address known: forward only from an older store to the same address that is
+                        # still in the store buffer (overrides the abstract-address match)
+                        addr = self.memSys.patterns[uop.prop.instr].address(uop.instrI.rnd)
+                        uop.storeBufferEntry = self.concreteStoreDict.get(addr)
 
                   for inpOp in uop.prop.inputOperands:
                      if isinstance(inpOp, PseudoOperand):
@@ -294,9 +313,25 @@ class Renamer:
                         if isinstance(outOp, RegOperand):
                            self.absValGen.setAbstractValueForCurInstr(key, uop.prop.instr)
                else:
-                  # e.g., xor rax, rax
-                  for op in uop.prop.instr.outputRegOperands:
-                     self.curInstrRndRenameDict[getCanonicalReg(op.reg)] = RenameDictEntry(RenamedOperand(uop=uop, ready=-1), False)
+                  # e.g., xor rax, rax (zero idiom: the result depends on nothing).
+                  # From Golden Cove (EMR) on, uops.info also reports 0 uops for instructions executed at rename
+                  # (add/sub/inc/dec reg, imm; lea reg, [reg + disp]). Their result still depends on the input
+                  # register, with latency 0, so the outputs alias the input's renamed operand.
+                  instr = uop.prop.instr
+                  srcKeys = {getCanonicalReg(op.reg) for op in instr.inputRegOperands + instr.memAddrOperands
+                             if getCanonicalReg(op.reg) not in ('RIP', None)}
+                  if instr.uops == 0 and len(srcKeys) == 1:
+                     srcKey = next(iter(srcKeys))
+                     srcOp = self.renameDict.setdefault(srcKey, RenameDictEntry(RenamedOperand(ready=-1), False)).renamedOp
+                     for op in instr.outputRegOperands:
+                        key = getCanonicalReg(op.reg)
+                        self.curInstrRndRenameDict[key] = RenameDictEntry(srcOp, False)
+                        self.absValGen.setAbstractValueForCurInstr(key, instr)
+                     for op in instr.outputFlagOperands:
+                        self.curInstrRndRenameDict[op.flags] = RenameDictEntry(srcOp, False)
+                  else:
+                     for op in uop.prop.instr.outputRegOperands:
+                        self.curInstrRndRenameDict[getCanonicalReg(op.reg)] = RenameDictEntry(RenamedOperand(uop=uop, ready=-1), False)
 
             if uop.prop.isLastUopOfInstr or uop.prop.isRegMergeUop or isinstance(uop, StackSyncUop):
                for key in self.curInstrRndRenameDict:
@@ -406,11 +441,21 @@ class FrontEnd:
 
    def cycle(self, clock):
       issueUops = []
-      if not self.reorderBuffer.isFull() and not self.scheduler.isFull(): # len(self.IDQ) >= uArchConfig.issueWidth and the first check seems to be wrong, but leads to better results
+      lsq = self.reorderBuffer.lsq
+      if lsq is not None:
+         lsq.cycle()
+      if (not self.reorderBuffer.isFull() and not self.scheduler.isFull() # len(self.IDQ) >= uArchConfig.issueWidth and the first check seems to be wrong, but leads to better results
+            and (lsq is None or not lsq.isFull())):
          issueUops = self.renamer.cycle()
 
       for fusedUop in issueUops:
          fusedUop.issued = clock
+      if lsq is not None:
+         lsq.issue(issueUops)
+         if lsq.lbFull():
+            self.perfEvents.setdefault(clock, {})['LBFull'] = 1
+         if lsq.sbFull():
+            self.perfEvents.setdefault(clock, {})['SBFull'] = 1
 
       self.reorderBuffer.cycle(clock, issueUops)
       self.scheduler.cycle(clock, issueUops)
@@ -771,11 +816,62 @@ class PreDecoder:
       return (not self.B16BlockQueue) and (not self.preDecQueue) and (not self.partialInstrI)
 
 
+class LoadStoreQueue:
+   """Load buffer (LB) and store buffer (SB) capacity. An LB entry per load uop from issue to retirement; an SB
+   entry per store from issue until it is written to L1 after retirement (in order, storeCommitWidth per cycle).
+   Issue stalls while either is full. Only active for microarchitectures that set LBWidth / SBWidth."""
+   def __init__(self, uArchConfig: MicroArchConfig):
+      self.uArchConfig = uArchConfig
+      self.nLoads = 0
+      self.nStores = 0
+      self.retiredStores = deque() # retired, not yet written to L1 (entries: StoreBufferEntry or None)
+      self.concreteStoreDict = None # set by the renamer: concrete address -> youngest StoreBufferEntry in the SB
+
+   def isFull(self):
+      c = self.uArchConfig
+      return (((c.LBWidth is not None) and self.nLoads + c.issueWidth > c.LBWidth)
+              or ((c.SBWidth is not None) and self.nStores + c.issueWidth > c.SBWidth))
+
+   def lbFull(self):
+      c = self.uArchConfig
+      return (c.LBWidth is not None) and self.nLoads + c.issueWidth > c.LBWidth
+
+   def sbFull(self):
+      c = self.uArchConfig
+      return (c.SBWidth is not None) and self.nStores + c.issueWidth > c.SBWidth
+
+   def issue(self, fusedUops):
+      for fusedUop in fusedUops:
+         for uop in fusedUop.getUnfusedUops():
+            if uop.prop.isLoadUop:
+               self.nLoads += 1
+            if uop.prop.isStoreAddressUop:
+               self.nStores += 1
+
+   def retire(self, fusedUop):
+      for uop in fusedUop.getUnfusedUops():
+         if uop.prop.isLoadUop:
+            self.nLoads -= 1
+         if uop.prop.isStoreAddressUop:
+            self.retiredStores.append(uop.storeBufferEntry)
+
+   def cycle(self):
+      for _ in range(self.uArchConfig.storeCommitWidth):
+         if not self.retiredStores:
+            break
+         sb = self.retiredStores.popleft()
+         self.nStores -= 1
+         if sb is not None and sb.concreteAddress is not None and self.concreteStoreDict is not None:
+            if self.concreteStoreDict.get(sb.concreteAddress) is sb:
+               del self.concreteStoreDict[sb.concreteAddress] # written to L1: no longer forwards
+
+
 class ReorderBuffer:
-   def __init__(self, retireQueue, uArchConfig: MicroArchConfig):
+   def __init__(self, retireQueue, uArchConfig: MicroArchConfig, lsq=None):
       self.uops = deque()
       self.retireQueue = retireQueue
       self.uArchConfig = uArchConfig
+      self.lsq = lsq
 
    def isEmpty(self):
       return not self.uops
@@ -796,6 +892,8 @@ class ReorderBuffer:
          if all((u.executed is not None and u.executed < clock) for u in unfusedUops):
             self.uops.popleft()
             self.retireQueue.append(fusedUop)
+            if self.lsq is not None:
+               self.lsq.retire(fusedUop)
             fusedUop.retired = clock
             fusedUop.retireIdx = nRetiredInSameCycle
             nRetiredInSameCycle += 1
@@ -811,8 +909,10 @@ class ReorderBuffer:
 
 
 class Scheduler:
-   def __init__(self, uArchConfig: MicroArchConfig):
+   def __init__(self, uArchConfig: MicroArchConfig, memSys=None):
       self.uArchConfig = uArchConfig
+      self.memSys = memSys # memsys.MemSystem or None (stock uiCA: every load is an L1 hit)
+      self.blockedLoads = set() # memory model: ready loads/prefetches waiting for a fill buffer
       self.uops = set()
       self.portUsage = {p:0  for p in allPorts[self.uArchConfig.name]}
       self.portUsageAtStartOfCycle = {}
@@ -834,7 +934,10 @@ class Scheduler:
       self.dependentUops = dict() # uops that have an operand that is written by a non-executed uop
 
    def isFull(self):
-      return len(self.uops) + self.uArchConfig.issueWidth > self.uArchConfig.RSWidth
+      n = len(self.uops)
+      if self.memSys is not None and not self.memSys.cfg.get('blockedLoadHoldsRS', True):
+         n -= len(self.blockedLoads) # blocked loads wait in the load buffer, not in the scheduler
+      return n + self.uArchConfig.issueWidth > self.uArchConfig.RSWidth
 
    def cycle(self, clock, newUops):
       if clock in self.uopsReadyInCycle:
@@ -884,9 +987,41 @@ class Scheduler:
          if not queue:
             continue
 
-         uop = heappop(queue)[1]
+         if self.memSys:
+            # a load/prefetch that needs a fill buffer while all are busy cannot be dispatched: it stays in the
+            # scheduler and retries in a later cycle; a younger ready uop on the same port may go instead
+            uop, blocked = None, []
+            while queue:
+               entry = heappop(queue)
+               cand = entry[1]
+               if (cand.prop.isLoadUop and (cand.prop.instr in self.memSys.patterns)
+                     and not (cand.storeBufferEntry is not None and cand.storeBufferEntry.concreteAddress is not None)
+                     and not self.memSys.canIssue(cand.prop.instr, cand.instrI.rnd, clock)):
+                  self.blockedLoads.add(cand)
+                  if cand.memFirstTry is None:
+                     cand.memFirstTry = clock
+                  self.memSys.noteBlocked(clock)
+                  blocked.append(entry)
+                  continue
+               uop = cand
+               break
+            for entry in blocked:
+               heappush(queue, entry)
+            if uop is None:
+               continue
+         else:
+            uop = heappop(queue)[1]
 
          uop.dispatched = clock
+         if uop in self.blockedLoads:
+            self.blockedLoads.discard(uop)
+         forwarded = (uop.prop.isLoadUop and uop.storeBufferEntry is not None and uop.storeBufferEntry.concreteAddress is not None)
+         if self.memSys and forwarded:
+            self.memSys.noteForwarded(uop.instrI.rnd, clock)
+         if self.memSys and uop.prop.isLoadUop and (uop.prop.instr in self.memSys.patterns) and not forwarded:
+            hint = memsys.prefetchHintOf(uop.prop.instr)
+            uop.memReady, uop.memDone = self.memSys.access(uop.prop.instr, uop.instrI.rnd, clock, hint is not None, hint,
+                                                           uop.memFirstTry)
          self.uops.remove(uop)
          uopsDispatched.append(uop)
          self.pendingUops.add(uop)
@@ -915,6 +1050,8 @@ class Scheduler:
             finishTime = max(finishTime, readyCycle)
          if notFinished:
             continue
+         if uop.memDone is not None:
+            finishTime = max(finishTime, uop.memDone)
 
          if uop.prop.isStoreAddressUop:
             addrReady = uop.dispatched + 5 # ToDo
@@ -1003,7 +1140,7 @@ class Scheduler:
                port = uop.prop.possiblePorts[0]
             elif self.uArchConfig.simplePortAssignment:
                port = random.choice(uop.prop.possiblePorts)
-            elif len(allPorts[self.uArchConfig.name]) == 10:
+            elif len(allPorts[self.uArchConfig.name]) in (10, 12): # ICL-like (10 ports) and EMR (12 ports: + ALU port B, load port A)
                applicablePortUsages = [(p,u) for p, u in self.portUsageAtStartOfCycle.get(clock-1, self.portUsageAtStartOfCycle[clock]).items()
                                        if p in uop.prop.possiblePorts]
                sortedPortUsages = sorted(applicablePortUsages, key=lambda x: (x[1], -int(x[0], 16)))
@@ -1902,7 +2039,7 @@ def getURL(instrStr):
 
 # Returns the throughput
 def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPolicy, noMicroFusion, noMacroFusion, simpleFrontEnd, minIterations, minCycles,
-                  printDetails=False, traceFile=None, graphFile=None, depGraphFile=None, jsonFile=None):
+                  printDetails=False, traceFile=None, graphFile=None, depGraphFile=None, jsonFile=None, memSpec=None, memJsonFile=None):
    instructions = getInstructions(disas, uArchConfig, importlib.import_module('instrData.'+uArchConfig.name+'_data'),
                                   alignmentOffset, noMicroFusion, noMacroFusion)
    if not instructions:
@@ -1912,13 +2049,27 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
    adjustLatenciesAndAddMergeUops(instructions, uArchConfig)
    computeUopProperties(instructions)
 
+   memSys = None
+   if memSpec is not None:
+      if not memSpec.get('accesses'):
+         print('memory instructions (use these indices in the "accesses" section of the memory spec):')
+         for i, instr in enumerate(instructions):
+            if instr.inputMemOperands or instr.outputMemOperands:
+               print('  {:3d}  {}'.format(i, instr.asm))
+         exit(0)
+      memSys = memsys.MemSystem(memSpec, instructions)
+
    retireQueue = deque()
-   rb = ReorderBuffer(retireQueue, uArchConfig)
-   scheduler = Scheduler(uArchConfig)
+   lsq = LoadStoreQueue(uArchConfig) if (uArchConfig.LBWidth is not None or uArchConfig.SBWidth is not None) else None
+   rb = ReorderBuffer(retireQueue, uArchConfig, lsq)
+   scheduler = Scheduler(uArchConfig, memSys)
 
    perfEvents: Dict[int, Dict[str, int]] = {}
    unroll = (not instructions[-1].isBranchInstr)
    frontEnd = FrontEnd(instructions, rb, scheduler, uArchConfig, unroll, alignmentOffset, initPolicy, perfEvents, simpleFrontEnd)
+   frontEnd.renamer.memSys = memSys
+   if lsq is not None:
+      lsq.concreteStoreDict = frontEnd.renamer.concreteStoreDict
 
    clock = 0
    rnd = 0
@@ -1953,6 +2104,25 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
       TP = uopsForRelRound[0][lastApplicableInstr][-1].retired
    else:
       TP = round((uopsForRelRound[-1][lastApplicableInstr][-1].retired - uopsForRelRound[0][lastApplicableInstr][-1].retired) / (len(uopsForRelRound)-1), 2)
+
+   if memSys is not None:
+      memSummary = memSys.summary(firstRelevantRound, lastRelevantRound)
+      memSummary['TP'] = TP
+      if 'window_cycles' in memSummary:
+         t0, t1 = memSummary['window_cycles']
+         for evt in ('LBFull', 'SBFull', 'RBFull', 'RSFull'):
+            n = sum(1 for c, e in perfEvents.items() if t0 <= c <= t1 and evt in e)
+            memSummary['avg'][evt + '_frac'] = n / max(1, t1 - t0)   # fraction of cycles in which issue saw it full
+      if printDetails:
+         print('Memory model ({} iterations in the measured window):'.format(memSummary['iterations']))
+         for k, v in sorted(memSummary['per_iter'].items()):
+            print('  {:24s} {:8.3f} per iteration'.format(k, v))
+         for k, v in sorted(memSummary['avg'].items()):
+            print('  {:24s} {:8.2f} {}'.format(k, v, 'of cycles' if k.endswith('_frac') else 'cycles (average)'))
+         print('')
+      if memJsonFile is not None:
+         with open(memJsonFile, 'w') as f:
+            json.dump(memSummary, f, indent=1)
 
    if printDetails or (depGraphFile is not None):
       nodesForInstr, edgesForNode = generateLatencyGraph(instructions, uArchConfig, initPolicy)
@@ -2025,8 +2195,11 @@ def main():
    parser.add_argument('-noMicroFusion', help='Variant that does not support micro-fusion', action='store_true')
    parser.add_argument('-noMacroFusion', help='Variant that does not support macro-fusion', action='store_true')
    parser.add_argument('-alignmentOffset', help='Alignment offset (relative to a 64-Byte cache line), or "all"; default: 0', default='0')
-   parser.add_argument('-minIterations', help='Simulate at least this many iterations; default: 10', type=int, default=10)
-   parser.add_argument('-minCycles', help='Simulate at least this many cycles; default: 500', type=int, default=500)
+   parser.add_argument('-minIterations', help='Simulate at least this many iterations; default: 10 (200 with -memSpec)', type=int, default=None)
+   parser.add_argument('-minCycles', help='Simulate at least this many cycles; default: 500 (50000 with -memSpec)', type=int, default=None)
+   parser.add_argument('-memSpec', help='Memory-system model: JSON spec with address patterns per memory instruction (see memsys.py); '
+                                        'without it, every load is an L1 hit')
+   parser.add_argument('-memJson', help='With -memSpec: write the memory-model statistics to this JSON file', nargs='?', const='mem.json')
    parser.add_argument('-json', help='JSON output', nargs='?', const='result.json')
    parser.add_argument('-depGraph', help='Output the dependency graph; the format is determined by the filename extension', nargs='?', const='dep.svg')
    parser.add_argument('-initPolicy', help='Initial register state; '
@@ -2035,6 +2208,15 @@ def main():
                                            '"stack" (they all have the same value, except for the stack and base pointers); '
                                            'default: "diff"', default='diff')
    args = parser.parse_args()
+
+   memSpec = memsys.loadSpec(args.memSpec) if args.memSpec else None
+   if args.minIterations is None:
+      args.minIterations = 200 if memSpec else 10
+   if args.minCycles is None:
+      args.minCycles = 50000 if memSpec else 500
+   if memSpec and (args.arch == 'all' or args.alignmentOffset == 'all'):
+      print('-memSpec needs a single -arch and alignment offset')
+      exit(1)
 
    if not args.arch in list(MicroArchConfigs) + ['all']:
       print('Unsupported microarchitecture')
@@ -2087,7 +2269,7 @@ def main():
          print('    - {:.2f} otherwise\n'.format(sortedTP[-1][0], sortedTP[-1][1]))
    else:
       TP = runSimulation(disas, uArchConfig, int(args.alignmentOffset), args.initPolicy, args.noMicroFusion, args.noMacroFusion, args.simpleFrontEnd,
-                         args.minIterations, args.minCycles, not args.TPonly, args.trace, args.graph, args.depGraph, args.json)
+                         args.minIterations, args.minCycles, not args.TPonly, args.trace, args.graph, args.depGraph, args.json, memSpec, args.memJson)
       if args.TPonly:
          print('{:.2f}'.format(TP))
 
