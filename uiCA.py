@@ -340,7 +340,9 @@ class Renamer:
                      prevRenOp = self.renameDict[key].renamedOp
                      if (not uop.eliminated) or (prevRenOp != self.curInstrRndRenameDict[key].renamedOp):
                         if (key in GPRegs) and (prevRenOp in self.multiUseGPRDict):
-                           self.multiUseGPRDict[prevRenOp].remove(key)
+                           # discard, not remove: a register aliased by rename-time execution (0-uop add/lea,
+                           # Golden Cove+) shares prevRenOp but was never added to its alias set
+                           self.multiUseGPRDict[prevRenOp].discard(key)
                         elif (type(key) == str) and ('MM' in key) and (prevRenOp in self.multiUseSIMDDict):
                            if self.multiUseSIMDDict[prevRenOp]:
                               self.multiUseSIMDDict[prevRenOp].remove(key)
