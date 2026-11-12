@@ -87,7 +87,9 @@ PRESETS = {
 # Xeon Max 9462 (HBM, node 2), uncore credit model. Cache sizes/latencies as EMR_d760 (same core); the uncore
 # parameters are per core and are fitted (DRAMHiT asm_study/uica/fit_uncore.py); pass per-thread values.
 PRESETS['XMAX_hbm'] = dict(PRESETS['EMR_d760'], uncoreModel='credits', LLCSize=112 << 20,
-   nL2Q=48, nCredit=33, nXQ=16, uncoreLatNs=141.0, coreGHz=2.69, l2Pipe=16, fbHoldT2='depart', fbAfterDepart=0)
+   nL2Q=29, nCredit=34, nXQ=16, uncoreLatNs=141.0, coreGHz=2.69, l2Pipe=16, fbHoldT2='l2q', fbAfterDepart=0)
+# fitted values for one thread per core: nL2Q per thread (effective), nCredit per core; for two hyperthreads
+# per core halve nFB / nCredit / nXQ (not nL2Q). uncoreLatNs depends on the socket's load (see fit_uncore.py).
 
 
 class Cache:
