@@ -37,6 +37,19 @@ bypassed accesses LLC* / DRAM*, dropped prefetches 'drop'. Without the bypass, a
 an FB while all are busy stays in the scheduler and retries. Caches are set-associative LRU; the LLC is
 non-inclusive (fills from DRAM go to L2/L1, L2 victims go to the LLC). Stores are not modelled.
 
+Uncore credit model (uncoreModel = "credits", OFF by default; calibrated on Xeon Max 9462 HBM, see PRESETS):
+replaces the LLC/DRAM part of an L2 miss. Measured on bw_t1 (tests in DRAMHiT bwgap/logs/mlp_calib): a core
+can have about 33 reads out in the uncore at once; requests beyond that wait inside the core (the XQ), which
+is why the 2nd hyperthread adds ~90 ns per request while the uncore latency stays the same.
+    L1 miss      FB station as above (nFB). A prefetcht1/t2 to memory holds its FB until the L2 has taken it
+                 (fbHoldT2 = "l2q": it has a miss-tracker entry) or until it leaves the core for the uncore
+                 ("depart"), + fbAfterDepart cycles; otherwise the fbServiceTime rule.
+    L2 miss      after l2Pipe cycles it takes an L2 miss-tracker entry (nL2Q; held until the data is back in
+                 L2), then waits for one of nCredit uncore credits: the XQ wait. With a credit it leaves;
+                 the data returns uncoreLatNs later (x coreGHz cycles). The credit is held until then.
+    xq_full_frac fraction of cycles with >= nXQ requests waiting for a credit (cf. xq.full_cycles).
+All counts are per hardware thread: for two hyperthreads that share a core, pass half the core's values.
+
 Addresses come from the instance (InstrInstance.memAddrs, set by the execution-driven front end); the
 regions of the state file (with their "warm" flags) and the parameters ("config") are passed in.
 """
@@ -71,6 +84,10 @@ PRESETS = {
       'DRAMLinesPerCycle': 2.08,   # 8 ch DDR5-5200 = 332.8 GB/s at 2.5 GHz; one socket
    },
 }
+# Xeon Max 9462 (HBM, node 2), uncore credit model. Cache sizes/latencies as EMR_d760 (same core); the uncore
+# parameters are per core and are fitted (DRAMHiT asm_study/uica/fit_uncore.py); pass per-thread values.
+PRESETS['XMAX_hbm'] = dict(PRESETS['EMR_d760'], uncoreModel='credits', LLCSize=112 << 20,
+   nL2Q=48, nCredit=33, nXQ=16, uncoreLatNs=141.0, coreGHz=2.69, l2Pipe=16, fbHoldT2='depart', fbAfterDepart=0)
 
 
 class Cache:
@@ -158,7 +175,12 @@ class MemSystem:
       c = self.cfg
       self.L1, self.L2, self.LLC = Cache(c['L1Size'], c['L1Assoc']), Cache(c['L2Size'], c['L2Assoc']), Cache(c['LLCSize'], c['LLCAssoc'])
       self.fbLog = []
-      self.FB, self.L2Q = SlotResource(c['nFB'], self.fbLog), SlotResource(c['nL2Q'])
+      self.l2qLog, self.xqLog = [], []   # (start, end): L2 miss-tracker entries; waits for an uncore credit
+      self.FB, self.L2Q = SlotResource(c['nFB'], self.fbLog), SlotResource(c['nL2Q'], self.l2qLog)
+      self.credits = c.get('uncoreModel') == 'credits'
+      if self.credits:
+         self.CR = SlotResource(c['nCredit'])
+         self.uncoreLat = c['uncoreLatNs'] * c['coreGHz']
       self.bypass = bool(c.get('fbBusyBypass', c.get('fbFullL2Hint', False)))
       self.BQ = SlotResource(c.get('nBypassQ') or 10**9)
       self.dramNextFree = 0.0
@@ -260,6 +282,14 @@ class MemSystem:
             inLLC = self.LLC.lookup(line)
             level = 'LLC' if inLLC else 'DRAM'
             holdFB = (svc is None) or svc > 0
+            if self.credits and not inLLC:
+               ready, fbWait, l2qWait = self._creditMiss(t, toL1, reqType, svc)
+               self._fillL2(line)
+               self.inflightL2[line] = ready - (c['L2Lat'] - c['L1Lat'])
+               if toL1:
+                  self._fillL1(line)
+                  self.inflightL1[line] = ready
+               return self._finish(instrI, rnd, t, ready, fbWait, l2qWait, isPrefetch, prefetchHint, level, firstTry)
             # FB station first; the L2Q station from the FB grant until the data returns
             def missTime(fbStart):
                def relQ(qStart):
@@ -300,6 +330,33 @@ class MemSystem:
             self._fillL1(line)
             self.inflightL1[line] = ready
 
+      return self._finish(instrI, rnd, t, ready, fbWait, l2qWait, isPrefetch, prefetchHint, level, firstTry)
+
+   def _creditMiss(self, t, toL1, reqType, svc):
+      """L2 miss to memory in the uncore credit model -> (data ready at L1/L2 level, fbWait, xqWait)"""
+      c = self.cfg
+      fbStart = self.FB.grant(t)
+      atL2 = fbStart + c['l2Pipe']                       # the miss is known at the L2
+      qStart = self.L2Q.grant(atL2)                      # L2 miss-tracker entry
+      crStart = self.CR.grant(qStart)                    # waits in the XQ for an uncore credit
+      back = crStart + self.uncoreLat                    # data back in L2
+      self.CR.hold(back)
+      self.L2Q.hold(back, qStart)
+      if crStart > qStart:
+         self.xqLog.append((qStart, crStart))
+      ready = back + (c['L2Lat'] - c['L1Lat']) if toL1 else back
+      if reqType == 't2' and c.get('fbHoldT2') == 'depart':          # until it leaves for the uncore
+         fbRel = min(crStart + c.get('fbAfterDepart', 0), back)
+      elif reqType == 't2' and c.get('fbHoldT2') == 'l2q':           # until the L2 has taken it (miss-tracker entry)
+         fbRel = min(qStart + c.get('fbAfterDepart', 0), back)
+      elif svc is None:
+         fbRel = ready if toL1 else back
+      else:
+         fbRel = min(fbStart + svc, ready if toL1 else back)
+      self.FB.hold(max(fbRel, fbStart + 1), fbStart)
+      return ready, fbStart - t, crStart - qStart
+
+   def _finish(self, instrI, rnd, t, ready, fbWait, l2qWait, isPrefetch, prefetchHint, level, firstTry):
       ready = math.ceil(ready)       # uiCA schedules in whole cycles (the DRAM server works in fractions)
       fbWait = math.ceil(fbWait)
       done = t + fbWait + 1
@@ -328,6 +385,22 @@ class MemSystem:
             occ += d
             last = x
          out['avg']['fb_full_frac'] = full / max(1, t1 - t0)   # cf. l1d_pend_miss.fb_full / cycles
+         def sweep(log, thresh):   # (cycles with >= thresh overlapping intervals, mean overlap)
+            e = sorted([(max(a, t0), 1) for a, b in log if b > t0 and a < t1] + [(min(b, t1), -1) for a, b in log if b > t0 and a < t1])
+            occ, last, ge, area = 0, t0, 0, 0
+            for x, d in e:
+               if occ >= thresh:
+                  ge += x - last
+               area += occ * (x - last)
+               occ += d
+               last = x
+            return ge / max(1, t1 - t0), area / max(1, t1 - t0)
+         if self.credits:
+            out['avg']['xq_full_frac'], out['avg']['xq_mean'] = sweep(self.xqLog, self.cfg['nXQ'])
+            _, out['avg']['l2q_mean'] = sweep(self.l2qLog, 10**9)   # cf. offcore_requests_outstanding / cycles
+            iv = [(a, b) for a, b in self.l2qLog if t0 <= a <= t1]
+            out['avg']['l2q_time'] = sum(b - a for a, b in iv) / max(1, len(iv))   # cycles per miss
+            out['per_cycle_misses'] = len(iv) / max(1, t1 - t0)
          nBlocked = sum(1 for c in self.blockedCycles if t0 <= c <= t1)
          out['avg']['dispatch_blocked_frac'] = nBlocked / max(1, t1 - t0)
          out['window_cycles'] = (t0, t1)
