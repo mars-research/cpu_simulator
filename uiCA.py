@@ -65,6 +65,7 @@ class Uop:
       self.memReady = None # memory model (-state): cycle in which the loaded data is ready
       self.memDone = None # memory model: earliest cycle in which the uop can finish (e.g., prefetch waiting for a fill buffer)
       self.memFirstTry = None # memory model: first cycle in which the uop was ready but blocked (no free fill buffer)
+      self.memLevel = None # memory model: where the access was served (L1, FB, L2, LLC, DRAM, SB, drop)
 
    def getUnfusedUops(self):
       return [self]
@@ -1067,9 +1068,11 @@ class Scheduler:
          forwarded = (uop.prop.isLoadUop and uop.storeBufferEntry is not None and uop.storeBufferEntry.concreteAddress is not None)
          if self.memSys and forwarded:
             self.memSys.noteForwarded(uop.instrI.rnd, clock)
+            uop.memLevel = 'SB'
          if self.memSys and uop.prop.isLoadUop and self.memSys.covers(uop.instrI) and not forwarded:
             hint = memsys.prefetchHintOf(uop.prop.instr)
             uop.memReady, uop.memDone = self.memSys.access(uop.instrI, clock, hint is not None, hint, uop.memFirstTry)
+            uop.memLevel = self.memSys.events[-1][2] if self.memSys.events else None
          self.uops.remove(uop)
          uopsDispatched.append(uop)
          self.pendingUops.add(uop)
@@ -2134,7 +2137,11 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
    if state is not None:
       # execution-driven: the emulator runs the code from the initial state; every executed instruction carries its
       # concrete addresses, and every memory access goes through the memory model
-      execution = execstate.Execution(state, instructions, stateDir)
+      if 'trace' in state:
+         import tracestate   # native trace (ptrace/steptrace) instead of the Unicorn emulator
+         execution = tracestate.TraceExecution(state, instructions, stateDir)
+      else:
+         execution = execstate.Execution(state, instructions, stateDir)
       regions = {name: {'size': r.size, 'warm': r.warm} for name, r in execution.regions.items()}
       memSys = memsys.MemSystem(state.get('config', 'EMR_d760'), regions, execution.bases)
 
@@ -2262,6 +2269,49 @@ def allRetired(instrInstances):
 
 # -state: cycles per round over the second half of the rounds (as uiCA's loop TP), program totals, memory model,
 # branch outcomes and the uops table (per round)
+def instructionTimingStats(instructions, rounds):
+   """Per static instruction, over the given rounds (lists of InstrInstance): executions and the average time each
+   of its uops spent in each pipeline phase, its ports and (memory uops) where its accesses were served.
+     wait_operands = readyForDispatch - issued   (waiting for inputs)
+     wait_dispatch = dispatched - readyForDispatch (waiting for a port, or a fill buffer for loads/prefetches)
+     exec          = executed - dispatched        (execution latency, including the memory access)
+     wait_retire   = retired - executed           (waiting for older instructions to retire)"""
+   acc = OrderedDict()
+   for rnd in rounds:
+      for instrI in rnd:
+         a = acc.setdefault(instrI.instr, {'n': 0, 'uops': 0, 'wait_operands': 0, 'wait_dispatch': 0, 'exec': 0,
+                                          'wait_retire': 0, 'ports': Counter(), 'mem': Counter(), 'fb_blocked': 0})
+         a['n'] += 1
+         for lamUop in instrI.uops:
+            for fusedUop in lamUop.getFusedUops():
+               for uop in fusedUop.getUnfusedUops():
+                  if uop.dispatched is None or uop.executed is None or fusedUop.retired is None or fusedUop.issued is None:
+                     continue
+                  a['uops'] += 1
+                  a['wait_operands'] += uop.readyForDispatch - fusedUop.issued
+                  a['wait_dispatch'] += uop.dispatched - uop.readyForDispatch
+                  a['exec'] += uop.executed - uop.dispatched
+                  a['wait_retire'] += fusedUop.retired - uop.executed
+                  if uop.actualPort:
+                     a['ports'][uop.actualPort] += 1
+                  if uop.memLevel:
+                     a['mem'][uop.memLevel] += 1
+                  if uop.memFirstTry is not None:
+                     a['fb_blocked'] += uop.dispatched - uop.memFirstTry
+   offsets, off = {}, 0
+   for instr in instructions:
+      offsets[instr] = off
+      off += len(instr.opcode) // 2
+   out = []
+   for instr, a in acc.items():
+      u = max(1, a['uops'])
+      out.append({'index': instructions.index(instr), 'offset': offsets[instr], 'asm': instr.asm, 'n': a['n'], 'uops_per_exec': a['uops'] / a['n'],
+                  **{k: a[k] / u for k in ('wait_operands', 'wait_dispatch', 'exec', 'wait_retire', 'fb_blocked')},
+                  'ports': {p: c / a['n'] for p, c in sorted(a['ports'].items())},
+                  'mem': {l: c / a['n'] for l, c in sorted(a['mem'].items())}})
+   return out
+
+
 def reportExecution(execution, instructions, frontEnd, memSys, perfEvents, roundRetired, clock, uArchConfig, printDetails,
                     memJsonFile, state):
    nRounds = len(roundRetired)
@@ -2298,11 +2348,13 @@ def reportExecution(execution, instructions, frontEnd, memSys, perfEvents, round
    summary['execution'] = {
       'rounds': nRounds, 'instructions': nInstrs, 'cycles': totalCycles, 'window_rounds': [winFirst, last],
       'instructions_per_round': nInstrs / nRounds,
-      'branches': [{'index': instructions.index(i), 'asm': i.asm, 'executed': n, 'taken': t} for i, (n, t) in branchStats.items()],
+      'branches': [{'index': instructions.index(i), 'offset': sum(len(j.opcode) // 2 for j in instructions[:instructions.index(i)]),
+                    'asm': i.asm, 'executed': n, 'taken': t} for i, (n, t) in branchStats.items()],
       'final_registers': {r: execution.reg(r) for r in list(OrderedDict.fromkeys(
          ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'rbp', 'rsp'] + ['r' + str(i) for i in range(8, 16)] +
          [r.lower() for r in state.get('registers', {})]))},
    }
+   summary['instructions'] = instructionTimingStats(instructions, instancesForRound[winFirst:last + 1])
    if memJsonFile is not None:
       with open(memJsonFile, 'w') as f:
          json.dump(summary, f, indent=1)
@@ -2374,8 +2426,10 @@ def main():
    state = None
    if args.state:
       global execstate
-      import execstate
-      state = execstate.loadState(args.state)
+      with open(args.state) as f:
+         state = json.load(f)
+      if 'trace' not in state:
+         import execstate   # Unicorn is needed only to emulate; a "trace" state replays a native trace
       if args.arch == 'all' or args.alignmentOffset == 'all':
          print('-state needs a single -arch and alignment offset')
          exit(1)
