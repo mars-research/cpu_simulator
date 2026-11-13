@@ -47,7 +47,12 @@ is why the 2nd hyperthread adds ~90 ns per request while the uncore latency stay
     L2 miss      after l2Pipe cycles it takes an L2 miss-tracker entry (nL2Q; held until the data is back in
                  L2), then waits for one of nCredit uncore credits: the XQ wait. With a credit it leaves;
                  the data returns uncoreLatNs later (x coreGHz cycles). The credit is held until then.
-    xq_full_frac fraction of cycles with >= nXQ requests waiting for a credit (cf. xq.full_cycles).
+    nThreadSlots per-thread limit (default none) on misses from the L2 lookup until creditHold after the data is
+                 back; a miss waits for it before it takes an L2 miss-tracker entry (in its FB).
+    creditHold   cycles the credit stays taken after the data is back (default 0); l2qRefill: cycles before a
+                 freed miss-tracker entry takes the next request (default 0).
+    xq_full_frac fraction of cycles with >= nXQ requests waiting for a credit (cf. xq.full_cycles); l2q_full_frac:
+                 fraction with all nL2Q entries in use.
 All counts are per hardware thread: for two hyperthreads that share a core, pass half the core's values.
 
 Addresses come from the instance (InstrInstance.memAddrs, set by the execution-driven front end); the
@@ -90,6 +95,12 @@ PRESETS['XMAX_hbm'] = dict(PRESETS['EMR_d760'], uncoreModel='credits', LLCSize=1
    nL2Q=29, nCredit=34, nXQ=16, uncoreLatNs=141.0, coreGHz=2.69, l2Pipe=16, fbHoldT2='l2q', fbAfterDepart=0)
 # fitted values for one thread per core: nL2Q per thread (effective), nCredit per core; for two hyperthreads
 # per core halve nFB / nCredit / nXQ (not nL2Q). uncoreLatNs depends on the socket's load (see fit_uncore.py).
+# Pool version (DRAMHiT bwgap/logs/mlp_lat, mlp_clk: 4 memories x 3 core clocks): a core has ~46 slots for reads
+# in the uncore (one thread can use ~40), each held for the uncore latency + ~150 core cycles; requests that wait
+# for a slot sit in the L2 miss queue (~56 per core, counted by offcore_requests_outstanding), which refills an
+# entry ~4 cycles after it frees. One thread per core values; for two hyperthreads pass nCredit 23, nL2Q 28, nFB 8
+# and l2qRefill 8 (the half-size queue sees half the core's departures).
+PRESETS['XMAX_hbm_pool'] = dict(PRESETS['XMAX_hbm'], nL2Q=56, nCredit=46, nThreadSlots=40, creditHold=150, l2qRefill=4, nXQ=56)
 
 
 class Cache:
@@ -182,6 +193,7 @@ class MemSystem:
       self.credits = c.get('uncoreModel') == 'credits'
       if self.credits:
          self.CR = SlotResource(c['nCredit'])
+         self.TQ = SlotResource(c.get('nThreadSlots') or 10**9)
          self.uncoreLat = c['uncoreLatNs'] * c['coreGHz']
       self.bypass = bool(c.get('fbBusyBypass', c.get('fbFullL2Hint', False)))
       self.BQ = SlotResource(c.get('nBypassQ') or 10**9)
@@ -339,11 +351,14 @@ class MemSystem:
       c = self.cfg
       fbStart = self.FB.grant(t)
       atL2 = fbStart + c['l2Pipe']                       # the miss is known at the L2
-      qStart = self.L2Q.grant(atL2)                      # L2 miss-tracker entry
+      tStart = self.TQ.grant(atL2)                       # per-thread slot (held until the credit is back)
+      qStart = self.L2Q.grant(tStart)                    # L2 miss-tracker entry
       crStart = self.CR.grant(qStart)                    # waits in the XQ for an uncore credit
       back = crStart + self.uncoreLat                    # data back in L2
-      self.CR.hold(back)
-      self.L2Q.hold(back, qStart)
+      self.CR.hold(back + c.get('creditHold', 0))        # the credit comes back creditHold cycles after the data
+      self.TQ.hold(back + c.get('creditHold', 0))
+      self.L2Q.hold(back + c.get('l2qRefill', 0))        # the freed entry takes its next request l2qRefill later
+      self.l2qLog.append((qStart, back))                 # counted like offcore_requests_outstanding
       if crStart > qStart:
          self.xqLog.append((qStart, crStart))
       ready = back + (c['L2Lat'] - c['L1Lat']) if toL1 else back
@@ -399,7 +414,7 @@ class MemSystem:
             return ge / max(1, t1 - t0), area / max(1, t1 - t0)
          if self.credits:
             out['avg']['xq_full_frac'], out['avg']['xq_mean'] = sweep(self.xqLog, self.cfg['nXQ'])
-            _, out['avg']['l2q_mean'] = sweep(self.l2qLog, 10**9)   # cf. offcore_requests_outstanding / cycles
+            out['avg']['l2q_full_frac'], out['avg']['l2q_mean'] = sweep(self.l2qLog, self.cfg['nL2Q'])   # mean: cf. offcore_requests_outstanding / cycles
             iv = [(a, b) for a, b in self.l2qLog if t0 <= a <= t1]
             out['avg']['l2q_time'] = sum(b - a for a, b in iv) / max(1, len(iv))   # cycles per miss
             out['per_cycle_misses'] = len(iv) / max(1, t1 - t0)
