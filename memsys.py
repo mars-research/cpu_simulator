@@ -49,8 +49,9 @@ is why the 2nd hyperthread adds ~90 ns per request while the uncore latency stay
                  the data returns uncoreLatNs later (x coreGHz cycles). The credit is held until then.
     nThreadSlots per-thread limit (default none) on misses from the L2 lookup until creditHold after the data is
                  back; a miss waits for it before it takes an L2 miss-tracker entry (in its FB).
-    creditHold   cycles the credit stays taken after the data is back (default 0); l2qRefill: cycles before a
-                 freed miss-tracker entry takes the next request (default 0).
+    creditHold   cycles the credit stays taken after the data is back (default 0); l2qRefill / fbRefill: cycles
+                 before a freed miss-tracker entry / fill buffer takes the next request (default 0; not counted
+                 as occupied in the full-fraction statistics).
     xq_full_frac fraction of cycles with >= nXQ requests waiting for a credit (cf. xq.full_cycles); l2q_full_frac:
                  fraction with all nL2Q entries in use.
 All counts are per hardware thread: for two hyperthreads that share a core, pass half the core's values.
@@ -100,7 +101,7 @@ PRESETS['XMAX_hbm'] = dict(PRESETS['EMR_d760'], uncoreModel='credits', LLCSize=1
 # for a slot sit in the L2 miss queue (~56 per core, counted by offcore_requests_outstanding), which refills an
 # entry ~4 cycles after it frees. One thread per core values; for two hyperthreads pass nCredit 23, nL2Q 28, nFB 8
 # and l2qRefill 8 (the half-size queue sees half the core's departures).
-PRESETS['XMAX_hbm_pool'] = dict(PRESETS['XMAX_hbm'], nL2Q=56, nCredit=46, nThreadSlots=40, creditHold=150, l2qRefill=4, nXQ=56)
+PRESETS['XMAX_hbm_pool'] = dict(PRESETS['XMAX_hbm'], nL2Q=56, nCredit=46, nThreadSlots=40, creditHold=150, l2qRefill=4, fbRefill=2, nXQ=56)
 
 
 class Cache:
@@ -141,10 +142,11 @@ class Cache:
 
 class SlotResource:
    """N identical slots; acquire(t, hold) -> start time >= t of the earliest free slot."""
-   def __init__(self, n, log=None):
+   def __init__(self, n, log=None, refill=0):
       self.n = n
       self.busy = []   # heap of release times
       self.log = log   # optional list of (start, release) occupancy intervals
+      self.refill = refill   # a released slot takes its next request this many cycles later (not logged as busy)
 
    def acquire(self, t, releaseFn):
       while self.busy and self.busy[0] <= t:
@@ -165,7 +167,7 @@ class SlotResource:
       return t
 
    def hold(self, release, start=None):
-      heapq.heappush(self.busy, release)
+      heapq.heappush(self.busy, release + self.refill)
       if self.log is not None and start is not None:
          self.log.append((start, release))
 
@@ -189,7 +191,7 @@ class MemSystem:
       self.L1, self.L2, self.LLC = Cache(c['L1Size'], c['L1Assoc']), Cache(c['L2Size'], c['L2Assoc']), Cache(c['LLCSize'], c['LLCAssoc'])
       self.fbLog = []
       self.l2qLog, self.xqLog = [], []   # (start, end): L2 miss-tracker entries; waits for an uncore credit
-      self.FB, self.L2Q = SlotResource(c['nFB'], self.fbLog), SlotResource(c['nL2Q'], self.l2qLog)
+      self.FB, self.L2Q = SlotResource(c['nFB'], self.fbLog, c.get('fbRefill', 0)), SlotResource(c['nL2Q'], self.l2qLog)
       self.credits = c.get('uncoreModel') == 'credits'
       if self.credits:
          self.CR = SlotResource(c['nCredit'])
