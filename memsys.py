@@ -49,6 +49,8 @@ is why the 2nd hyperthread adds ~90 ns per request while the uncore latency stay
                  the data returns uncoreLatNs later (x coreGHz cycles). The credit is held until then.
     nThreadSlots per-thread limit (default none) on misses from the L2 lookup until creditHold after the data is
                  back; a miss waits for it before it takes an L2 miss-tracker entry (in its FB).
+    xqEvictHold  cycles the L2 victim of each fill holds the read's XQ entry after the data is back (default 0;
+                 one clean writeback per fill, l2_lines_out.non_silent = offcore data reads on bw_t1).
     creditHold   cycles the credit stays taken after the data is back (default 0); l2qRefill / fbRefill: cycles
                  before a freed miss-tracker entry / fill buffer takes the next request (default 0; not counted
                  as occupied in the full-fraction statistics).
@@ -190,7 +192,7 @@ class MemSystem:
       c = self.cfg
       self.L1, self.L2, self.LLC = Cache(c['L1Size'], c['L1Assoc']), Cache(c['L2Size'], c['L2Assoc']), Cache(c['LLCSize'], c['LLCAssoc'])
       self.fbLog = []
-      self.l2qLog, self.xqLog = [], []   # (start, end): L2 miss-tracker entries; waits for an uncore credit
+      self.l2qLog, self.xqLog, self.xqAllLog = [], [], []   # (start, end): L2 miss-tracker entries; waits for an uncore credit
       self.FB, self.L2Q = SlotResource(c['nFB'], self.fbLog, c.get('fbRefill', 0)), SlotResource(c['nL2Q'], self.l2qLog)
       self.credits = c.get('uncoreModel') == 'credits'
       if self.credits:
@@ -359,8 +361,10 @@ class MemSystem:
       back = crStart + self.uncoreLat                    # data back in L2
       self.CR.hold(back + c.get('creditHold', 0))        # the credit comes back creditHold cycles after the data
       self.TQ.hold(back + c.get('creditHold', 0))
-      self.L2Q.hold(back + c.get('l2qRefill', 0))        # the freed entry takes its next request l2qRefill later
-      self.l2qLog.append((qStart, back))                 # counted like offcore_requests_outstanding
+      ev = c.get('xqEvictHold', 0)                       # the L2 victim of this fill leaves through the same XQ entry
+      self.L2Q.hold(back + ev + c.get('l2qRefill', 0))   # the freed entry takes its next request l2qRefill later
+      self.l2qLog.append((qStart, back))                 # reads only: counted like offcore_requests_outstanding
+      self.xqAllLog.append((qStart, back + ev))          # reads + evictions: cf. xq.full_cycles
       if crStart > qStart:
          self.xqLog.append((qStart, crStart))
       ready = back + (c['L2Lat'] - c['L1Lat']) if toL1 else back
@@ -416,7 +420,8 @@ class MemSystem:
             return ge / max(1, t1 - t0), area / max(1, t1 - t0)
          if self.credits:
             out['avg']['xq_full_frac'], out['avg']['xq_mean'] = sweep(self.xqLog, self.cfg['nXQ'])
-            out['avg']['l2q_full_frac'], out['avg']['l2q_mean'] = sweep(self.l2qLog, self.cfg['nL2Q'])   # mean: cf. offcore_requests_outstanding / cycles
+            out['avg']['l2q_full_frac'], out['avg']['l2q_mean'] = sweep(self.l2qLog, self.cfg['nL2Q'])
+            out['avg']['xqall_full_frac'], out['avg']['xqall_mean'] = sweep(self.xqAllLog, self.cfg['nL2Q'])   # reads + evictions   # mean: cf. offcore_requests_outstanding / cycles
             iv = [(a, b) for a, b in self.l2qLog if t0 <= a <= t1]
             out['avg']['l2q_time'] = sum(b - a for a, b in iv) / max(1, len(iv))   # cycles per miss
             out['per_cycle_misses'] = len(iv) / max(1, t1 - t0)
