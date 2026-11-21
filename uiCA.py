@@ -65,6 +65,7 @@ class Uop:
       self.memReady = None # memory model (-state): cycle in which the loaded data is ready
       self.memDone = None # memory model: earliest cycle in which the uop can finish (e.g., prefetch waiting for a fill buffer)
       self.memFirstTry = None # memory model: first cycle in which the uop was ready but blocked (no free fill buffer)
+      self.memReq = None # memory model: memsys.Req of this access; the uop cannot finish before it is resolved
       self.memLevel = None # memory model: where the access was served (L1, FB, L2, LLC, DRAM, SB, drop)
 
    def getUnfusedUops(self):
@@ -131,6 +132,8 @@ class RenamedOperand:
 
       if self.uop.dispatched is None:
          return None
+      if self.uop.memReq is not None and not self.uop.memReq.resolved:
+         return None # memory model: the data-ready time is not known yet
 
       lat = self.uop.prop.latencies.get(self.nonRenamedOperand, 1)
       if self.uop.latReducedDueToFastPtrChasing:
@@ -185,6 +188,9 @@ class Renamer:
       self.renamerActiveCycle += 1
 
       renamerUops = []
+      if self.uArchConfig.renameExecWidth is not None:   # token bucket: renameExecWidth may be fractional (average rate)
+         self.renameExecTokens = min(getattr(self, 'renameExecTokens', 0) + self.uArchConfig.renameExecWidth,
+                                     max(1, math.ceil(self.uArchConfig.renameExecWidth)))
       while self.IDQ:
          lamUop = self.IDQ[0]
 
@@ -206,6 +212,13 @@ class Renamer:
          fusedUops = lamUop.getFusedUops()
          if len(renamerUops) + len(fusedUops) > self.uArchConfig.issueWidth:
             break
+         instr = firstUnfusedUop.prop.instr
+         if (self.uArchConfig.renameExecWidth is not None and firstUnfusedUop.prop.isFirstUopOfInstr and instr.uops == 0
+               and not instr.mayBeEliminated):
+            # instructions executed at rename (Golden Cove: add/sub/inc/dec reg, imm; lea): renameExecWidth per cycle
+            if self.renameExecTokens < 1:
+               break
+            self.renameExecTokens -= 1
          renamerUops.extend(fusedUops)
          self.IDQ.popleft()
 
@@ -694,6 +707,9 @@ class DSB:
                self.delayInPrevCycle = True
             else:
                remainingSlots -= 1
+            if (self.uArchConfig.DSBTakenBranchEndsCycle and getattr(entry.instrI, 'taken', False)
+                  and entry.uop.getUnfusedUops()[-1].prop.isLastUopOfInstr):
+               remainingSlots = 0  # delivery continues at the branch target in the next cycle
          if entry.MSUops:
             self.MS.addUops(entry.MSUops, 'DSB')
             remainingSlots = 0
@@ -1071,7 +1087,7 @@ class Scheduler:
             uop.memLevel = 'SB'
          if self.memSys and uop.prop.isLoadUop and self.memSys.covers(uop.instrI) and not forwarded:
             hint = memsys.prefetchHintOf(uop.prop.instr)
-            uop.memReady, uop.memDone = self.memSys.access(uop.instrI, clock, hint is not None, hint, uop.memFirstTry)
+            uop.memReq = self.memSys.access(uop.instrI, clock, hint is not None, hint, uop.memFirstTry)
             uop.memLevel = self.memSys.events[-1][2] if self.memSys.events else None
          self.uops.remove(uop)
          uopsDispatched.append(uop)
@@ -1088,6 +1104,10 @@ class Scheduler:
 
    def processPendingUops(self):
       for uop in list(self.pendingUops):
+         if uop.memReq is not None:
+            if not uop.memReq.resolved:
+               continue # memory model: still waiting (e.g., a prefetch for a fill buffer, a load for its data)
+            uop.memReady, uop.memDone = uop.memReq.ready, uop.memReq.done
          finishTime = uop.dispatched + 2
          if uop.prop.isFirstUopOfInstr and (uop.prop.instr.TP is not None):
             finishTime = max(finishTime, uop.dispatched + uop.prop.instr.TP)
@@ -2143,7 +2163,7 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
       else:
          execution = execstate.Execution(state, instructions, stateDir)
       regions = {name: {'size': r.size, 'warm': r.warm} for name, r in execution.regions.items()}
-      memSys = memsys.MemSystem(state.get('config', 'EMR_d760'), regions, execution.bases)
+      memSys = memsys.MemSystem(state.get('config', 'XMAX_hbm'), regions, execution.bases)
 
    retireQueue = deque()
    lsq = LoadStoreQueue(uArchConfig) if (uArchConfig.LBWidth is not None or uArchConfig.SBWidth is not None) else None
@@ -2162,7 +2182,11 @@ def runSimulation(disas, uArchConfig: MicroArchConfig, alignmentOffset, initPoli
    uopsForRound = []
    roundRetired = [] # -state: cycle in which the last uop of each round retired
    while True:
+      if memSys is not None:
+         memSys.tick(clock)
       frontEnd.cycle(clock)
+      if memSys is not None:
+         memSys.endCycle(clock)
       while retireQueue:
          fusedUop = retireQueue.popleft()
          for uop in fusedUop.getUnfusedUops():

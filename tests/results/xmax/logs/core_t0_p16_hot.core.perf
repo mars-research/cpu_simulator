@@ -1,0 +1,8 @@
+# started on Fri Nov 20 21:03:49 2026
+
+6305757162,,cycles,2340276448,100.00,,
+6318951372,,ref-cycles,2340229105,100.00,,
+28123447377,,instructions,2340191184,100.00,4.46,insn per cycle
+20745,,offcore_requests.data_rd,2340154062,100.00,,
+109340,,l1d.replacement,2340116592,100.00,,
+157,,l2_rqsts.hwpf_miss,2340079380,100.00,,

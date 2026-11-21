@@ -1,0 +1,9 @@
+# started on Thu Nov 19 17:03:00 2026
+
+20399861589,,cycles,7571516392,100.00,,
+20443241376,,ref-cycles,7571460443,100.00,,
+59366746299,,instructions,7571422835,100.00,2.91,insn per cycle
+479308296116,,offcore_requests_outstanding.data_rd,7571385638,100.00,,
+1482948572,,offcore_requests.data_rd,7571348394,100.00,,
+9002897,,xq.full_cycles,7571310937,100.00,,
+10594359503,,l1d_pend_miss.fb_full,7571273237,100.00,,

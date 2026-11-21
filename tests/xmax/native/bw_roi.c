@@ -1,0 +1,1093 @@
+#define _GNU_SOURCE // Required for pthread_barrier and CPU affinity
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <sched.h>
+#include <sys/mman.h>
+#include <numa.h>
+#include <numaif.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <immintrin.h> // Required for _mm_prefetch, AVX-512, and _mm_crc32_u64
+#include <smmintrin.h> // specifically for SSE4.2 CRC32
+#include <x86intrin.h> // Required for __rdtsc()
+
+#define HUGE_PAGE_SIZE (2 * 1024 * 1024) // 2MB
+#ifndef MAP_HUGE_2MB
+#define MAP_HUGE_2MB (21 << 26)
+#endif
+
+#define MAX_PATTERNS 64
+#define MAX_REGIONS 64
+#ifndef NUM_ITERATIONS
+#define NUM_ITERATIONS 100 // Adjust as needed; -DNUM_ITERATIONS=n for cache-resident buffers
+#endif
+
+// Topology Limits
+#define MAX_NUMA_NODES 128
+#define MAX_CPUS_PER_NODE 1024
+
+// ---------------------------------------------------------
+// Compile-Time Access Pattern Macros
+// ---------------------------------------------------------
+#if defined(RANDOM)
+    #define GET_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = _mm_crc32_u64(state_var, (uint64_t)(i)) & (NUM_CACHELINES - 1); \
+        (void)idx_var
+    #define GET_LOOKAHEAD_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = _mm_crc32_u64(state_var, (uint64_t)((i) + PREFETCH_AHEAD)) & (NUM_CACHELINES - 1); \
+        (void)idx_var
+    #define GET_NEAR_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = _mm_crc32_u64(state_var, (uint64_t)((i) + NEAR_AHEAD)) & (NUM_CACHELINES - 1); \
+        (void)idx_var
+#elif defined(SEQUENTIAL) || defined(SEQUANTIAL)
+    #define GET_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = (i) & (NUM_CACHELINES - 1); \
+        (void)idx_var
+    #define GET_LOOKAHEAD_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = ((i) + PREFETCH_AHEAD) & (NUM_CACHELINES - 1); \
+        (void)idx_var
+    #define GET_NEAR_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = ((i) + NEAR_AHEAD) & (NUM_CACHELINES - 1); \
+        (void)idx_var
+#else
+    #define GET_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = workload[i]; \
+        (void)idx_var
+    #define GET_LOOKAHEAD_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = workload[(i) + PREFETCH_AHEAD]; \
+        (void)idx_var
+    #define GET_NEAR_IDX(idx_var, i, state_var) \
+        uint64_t idx_var = workload[(i) + NEAR_AHEAD]; \
+        (void)idx_var
+#endif
+// ---------------------------------------------------------
+
+typedef enum {
+    INST_LOAD,
+    INST_AVX512_LOAD,
+    INST_PREFETCH_T0,
+    INST_PREFETCH_T1,
+    INST_PREFETCH_T2,
+    INST_PREFETCH_NTA,
+    INST_PREFETCH_W,
+    // prefetcht1 PREFETCH_AHEAD lines ahead, then a 512-bit load and a 512-bit
+    // compare of the current line -- the per-line work of the hashtable's SIMD
+    // bucket probe (light AVX-512 integer ops only). Write mode: prefetcht1 + zmm store.
+    INST_PREFETCH_T1_AVX512,
+    // As INST_PREFETCH_T1_AVX512, plus three dependent 512-bit 64-bit multiplies
+    // (vpmullq) per line, a heavy AVX-512 op, to see the heavy-license clock.
+    INST_PREFETCH_T1_AVX512_HEAVY,
+    // Calibration modes (read only). t1pad: the t1 loop plus -pad N independent ALU
+    // instructions per line. double: the hashtable find's two-prefetch pattern, a prefetcht2
+    // PREFETCH_AHEAD lines ahead (the enqueue-time prefetch, HBM -> L2) and a prefetcht0
+    // -near lines ahead (the dequeue-time prefetch, L2 -> L1), then the demand load; also
+    // takes -pad N. Together they show how bandwidth and cycles per line depend on the
+    // instruction count per line, and what the second prefetch costs on its own.
+    INST_PREFETCH_T1_PAD,
+    INST_PREFETCH_DOUBLE,
+    // t1dpad: the t1 loop, then -pad N *serially dependent* single-cycle ALU instructions that
+    // consume the loaded value (a chain through one register, started by the load). The
+    // counterpart of t1pad, whose N instructions are independent of the load: same
+    // instruction count, different dependence on the memory data.
+    INST_PREFETCH_T1_DPAD,
+    // mimic -stage S: the double loop (+ -pad) built up toward the dramblast find loop, cumulative:
+    // 1 64 B vector load of the line; 2 + key broadcast/compare/kortest/branch on the loaded line;
+    // 3 + kshift/compress/store of the match into a result ring; 4 + 3 stores of a queue entry;
+    // 5 + the key (8 B, prefetched 16 ahead) comes from a 6.7 MB DDR array instead of an L1-resident one.
+    INST_MIMIC,
+    // Full-cache-line non-temporal store. Every other write path stores 8 B into a
+    // 64 B line, so the line has to be fetched first (RFO) and written back later --
+    // two DRAM transactions per store. A 64 B NT store fills a write-combining buffer
+    // and goes straight to memory with no fetch, so it is the only write path here
+    // that does not pay that. Write mode only; in read mode it is a plain load.
+    INST_NT_STORE
+} inst_type_t;
+
+typedef enum {
+    MODE_READ,
+    MODE_WRITE
+} rw_mode_t;
+
+typedef struct {
+    int cpu_node;
+    unsigned long mem_nodemask;
+    int num_threads;
+} pattern_t;
+
+typedef struct {
+    int thread_id;
+    int cpu_id;
+    int cpu_node;
+    unsigned long mem_nodemask;
+    size_t chunk_size;
+    uint64_t *buffer;
+    inst_type_t inst_type;
+    rw_mode_t rw_mode;
+    uint64_t lookahead;
+    uint64_t near_dist;
+    int pad;
+    int stage;
+    uint64_t *mk;            // mimic: per-thread key array
+    uint64_t elapsed_cycles;
+} thread_arg_t;
+
+// ---------------------------------------------------------
+// Shared (overlapping) region
+//
+// The default workload gives every thread a private chunk, so no two threads
+// ever touch the same cache line and the only cross-socket traffic is the one
+// caused by placement. To see what a shared structure does to UPI -- a hash
+// table probed by both packages -- all threads also index one region held in
+// common, at a random line each time, with a configurable fraction of the
+// accesses being stores. Those stores are what pull lines away from the other
+// socket and put invalidate/snoop traffic on the link.
+// ---------------------------------------------------------
+uint64_t *shared_buffer = NULL;
+size_t shared_size = 0;             // 0 disables the whole mode
+uint64_t shared_cacheline_mask = 0; // shared_size/64 - 1, so a power of two
+unsigned long shared_nodemask = 0;
+
+// Per-access decisions are taken from a second hash, so that choosing the
+// region and choosing read-vs-write stay independent of the address. Both are
+// compared against a threshold out of 1024, which gives percentages to within
+// 0.1% without a division in the loop.
+#define DECISION_SCALE 1024
+int share_threshold = DECISION_SCALE; // accesses that land in the shared region
+int write_threshold = 0;              // of those, the ones that are stores
+
+// Global Synchronization Barriers
+pthread_barrier_t init_barrier;
+pthread_barrier_t start_barrier;
+pthread_barrier_t end_barrier;
+// ROI control for perf --control fifo:PERF_CTL,PERF_ACK (scratch addition)
+#include <fcntl.h>
+#include <time.h>
+static int perf_ctl_fd = -1, perf_ack_fd = -1;   // first pair; all pairs below
+static int n_perf = 0, ctl_fds[4], ack_fds[4];
+static volatile int roi_state = 0;          // 0 before, 1 counting, 2 stopped
+static double roi_t0, roi_t1;
+static int pf_only = 0;    // BW_PFONLY=1: t0/t1 read loops prefetch only, no demand load
+static double now_s(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec * 1e-9; }
+static void perf_cmd(const char *c) {
+    char ack[16];
+    for (int k = 0; k < n_perf; k++) if (write(ctl_fds[k], c, strlen(c)) < 0) perror("perf ctl write");
+    for (int k = 0; k < n_perf; k++) if (read(ack_fds[k], ack, sizeof ack) <= 0) perror("perf ack read");
+}
+static void roi_start(void) {
+    if (perf_ctl_fd < 0) return;
+    perf_cmd("enable\n"); roi_t0 = now_s(); roi_state = 1;
+}
+static void roi_stop(void) {               // first worker out of its loop stops counting
+    if (perf_ctl_fd < 0) return;
+    if (__sync_bool_compare_and_swap(&roi_state, 1, 2)) { perf_cmd("disable\n"); roi_t1 = now_s(); }
+}
+
+// Global dummy variable to prevent compiler from optimizing away the reads
+volatile uint64_t global_sink = 0;
+
+// "2" / "2,3" / "0-3" -> a numa node bitmask. Shared by the pattern parser and
+// by -shared-nodes, so both spell placement the same way.
+unsigned long parse_node_mask(const char *spec) {
+    unsigned long mask = 0;
+    char buf[64];
+    strncpy(buf, spec, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *saveptr;
+    char *token = strtok_r(buf, ",", &saveptr);
+    while (token) {
+        char *dash = strchr(token, '-');
+        if (dash) {
+            *dash = '\0';
+            int start = atoi(token);
+            int end = atoi(dash + 1);
+            for (int i = start; i <= end; i++) mask |= (1UL << i);
+        } else {
+            mask |= (1UL << atoi(token));
+        }
+        token = strtok_r(NULL, ",", &saveptr);
+    }
+    return mask;
+}
+
+size_t parse_size(const char *str) {
+    char *endptr;
+    double val = strtod(str, &endptr);
+    if (*endptr != '\0') {
+        if (*endptr == 'k' || *endptr == 'K') val *= 1024;
+        else if (*endptr == 'm' || *endptr == 'M') val *= 1024 * 1024;
+        else if (*endptr == 'g' || *endptr == 'G') val *= 1024 * 1024 * 1024;
+    }
+    return (size_t)val;
+}
+
+// Independent per-thread streams.
+//
+// The private path seeds its crc32 with thread_id + constant, which is fine
+// while each thread indexes its own buffer. Pointed at one shared region it is
+// not: crc32 is linear, so crc32(seed, i) = A(seed) XOR B(i) and every thread
+// walks the same B(i) sequence. The threads then march in lockstep over one
+// address stream -- the first to arrive misses, the rest hit the line it just
+// pulled in -- and the measured miss rate collapses to 1/threads. That looks
+// like a shared table but behaves like one stream read many times.
+//
+// splitmix64 over a well-separated per-thread seed gives each thread its own
+// stream instead, so threads land on the same line by chance, at the rate
+// concurrent probes into a shared table actually do.
+static inline uint64_t mix64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+// One shared-mode access: pick the region, then the line inside it.
+//   h  - hash that supplies the address
+//   d  - hash that supplies the decisions (region, read vs write)
+// Threads seed h differently, so they roam the same region independently and
+// overlap by chance, the way concurrent probes into a hash table do.
+#define SHARED_PICK(h, d, buf_out, idx_out)                                   \
+    uint64_t *buf_out;                                                        \
+    uint64_t idx_out;                                                         \
+    do {                                                                      \
+        int _use_shared = (int)(((d) >> 10) & (DECISION_SCALE - 1))           \
+                          < share_threshold;                                  \
+        buf_out = _use_shared ? shared_buffer : t->buffer;                    \
+        idx_out = (h) & (_use_shared ? shared_cacheline_mask                   \
+                                     : (NUM_CACHELINES - 1));                 \
+    } while (0)
+
+// Scalar loop body, one per prefetch flavour so the instruction choice stays
+// hoisted out of the loop exactly as it is in the private-chunk path.
+// need_decisions is loop-invariant, so the branch predicts perfectly and -O3
+// can unswitch it: when the region and the read/write choice are both fixed
+// (-share 0 or 100 with -mix 0 or 100) the decision hash is never computed and
+// the loop costs the same as the private-chunk one. d == 0 then selects
+// "private, read" or "shared, write" correctly, because every threshold
+// comparison is against 0.
+#define SHARED_SCALAR_LOOP(PF_STMT)                                           \
+    for (uint64_t i = 0; i < ops; i++) {                                      \
+        uint64_t h = mix64(addr_seed + (uint64_t)i);                          \
+        uint64_t d = need_decisions                                           \
+                   ? mix64(decision_seed + (uint64_t)i) : 0;                  \
+        SHARED_PICK(h, d, buf, idx);                                          \
+        uint64_t h2 = mix64(addr_seed + (uint64_t)(i + PREFETCH_AHEAD));      \
+        uint64_t d2 = need_decisions                                          \
+                    ? mix64(decision_seed + (uint64_t)(i + PREFETCH_AHEAD))   \
+                    : 0;                                                      \
+        SHARED_PICK(h2, d2, buf_ahead, idx_ahead);                            \
+        PF_STMT(&buf_ahead[idx_ahead * 8]);                                   \
+        if ((int)(d & (DECISION_SCALE - 1)) < write_threshold) {              \
+            buf[idx * 8] = 0xff;                                              \
+        } else {                                                              \
+            local_dummy += buf[idx * 8];                                      \
+        }                                                                     \
+    }
+
+#define PF_NONE(addr) do { (void)(addr); } while (0)
+#define PF_T0(addr)   _mm_prefetch((const char *)(addr), _MM_HINT_T0)
+#define PF_T1(addr)   _mm_prefetch((const char *)(addr), _MM_HINT_T1)
+#define PF_T2(addr)   _mm_prefetch((const char *)(addr), _MM_HINT_T2)
+#define PF_NTA(addr)  _mm_prefetch((const char *)(addr), _MM_HINT_NTA)
+#define PF_W(addr)    __builtin_prefetch((const void *)(addr), 1, 3)
+
+// ---- calibration loops: -pad N adds N independent single-cycle ALU instructions per line ----
+#define PAD8() __asm__ volatile("add $1,%0\n\tadd $1,%1\n\tadd $1,%2\n\tadd $1,%3\n\t" \
+                                "add $1,%4\n\tadd $1,%5\n\tadd $1,%6\n\tadd $1,%7"        \
+                                : "+r"(p0), "+r"(p1), "+r"(p2), "+r"(p3), "+r"(p4), "+r"(p5), \
+                                  "+r"(p6), "+r"(p7))
+#define T1PAD_LOOP(PADCODE)                                                        \
+    for (uint64_t i = 0; i < ops; i++) {                                           \
+        GET_IDX(idx, i, state_var);                                                \
+        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);                            \
+        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T1);     \
+        local_dummy += t->buffer[idx * 8];                                         \
+        PADCODE                                                                    \
+    }
+#define DOUBLE_LOOP(PADCODE)                                                       \
+    for (uint64_t i = 0; i < ops; i++) {                                           \
+        GET_IDX(idx, i, state_var);                                                \
+        GET_LOOKAHEAD_IDX(idx_far, i, state_var);                                  \
+        GET_NEAR_IDX(idx_near, i, state_var);                                      \
+        _mm_prefetch((const char*)&t->buffer[idx_far * 8], _MM_HINT_T2);           \
+        _mm_prefetch((const char*)&t->buffer[idx_near * 8], _MM_HINT_T0);          \
+        local_dummy += t->buffer[idx * 8];                                         \
+        PADCODE                                                                    \
+    }
+#define MIMIC_LOOP(S, PADCODE)                                                     \
+    for (uint64_t i = 0; i < ops; i++) {                                           \
+        GET_IDX(idx, i, state_var);                                                \
+        GET_LOOKAHEAD_IDX(idx_far, i, state_var);                                  \
+        GET_NEAR_IDX(idx_near, i, state_var);                                      \
+        _mm_prefetch((const char*)&t->buffer[idx_far * 8], _MM_HINT_T2);           \
+        _mm_prefetch((const char*)&t->buffer[idx_near * 8], _MM_HINT_T0);          \
+        __m512i v = _mm512_load_si512((const void*)&t->buffer[idx * 8]);           \
+        macc = _mm512_xor_si512(macc, v);                                          \
+        if (S >= 2) {                                                              \
+            const uint64_t *kp = &kbase[ki];                                   \
+            if ((ki & 7) == 0) _mm_prefetch((const char*)&kbase[ki + 16], _MM_HINT_T0); \
+            if (++ki == kn) ki = 0;                                                \
+            __m512i bk = _mm512_set1_epi64((long long)kp[0]);                      \
+            __mmask8 m = _mm512_mask_cmpeq_epu64_mask(0x55, v, bk);                \
+            if (__builtin_expect(m == 0, 0)) { local_dummy += 1; }                 \
+            if (S >= 3) {                                                          \
+                __m512i r = _mm512_maskz_compress_epi64((__mmask8)(m << 1), v);    \
+                _mm_storel_epi64((__m128i*)&res[ro * 2 + 1], _mm512_castsi512_si128(r)); \
+                *(uint32_t*)&res[ro * 2] = (uint32_t)idx_far;                      \
+                ro = (ro + 1) & 63;                                                \
+                if (S >= 4) {                                                      \
+                    uint64_t *q = &ring[(i & 63) * 4];                             \
+                    q[0] = kp[0]; q[1] = idx_far;                                  \
+                    _mm_storel_epi64((__m128i*)&q[2], _mm_cvtsi64_si128((long long)idx_near)); \
+                    *(uint32_t*)&q[3] = (uint32_t)i;                               \
+                }                                                                  \
+            }                                                                      \
+        }                                                                          \
+        PADCODE                                                                    \
+    }
+#define MIMIC_S1(P) MIMIC_LOOP(1, P)
+#define MIMIC_S2(P) MIMIC_LOOP(2, P)
+#define MIMIC_S3(P) MIMIC_LOOP(3, P)
+#define MIMIC_S4(P) MIMIC_LOOP(4, P)
+#define DPAD8() __asm__ volatile("add $1,%0\n\tadd $1,%0\n\tadd $1,%0\n\tadd $1,%0\n\t" \
+                                 "add $1,%0\n\tadd $1,%0\n\tadd $1,%0\n\tadd $1,%0" : "+r"(dx))
+#define T1DPAD_LOOP(PADCODE)                                                       \
+    for (uint64_t i = 0; i < ops; i++) {                                           \
+        GET_IDX(idx, i, state_var);                                                \
+        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);                            \
+        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T1);     \
+        uint64_t dx = t->buffer[idx * 8];                                          \
+        PADCODE                                                                    \
+        local_dummy += dx;                                                         \
+    }
+// prefetch-only loops with an optional dependent-add chain (-pad N): about one prefetch per N cycles
+#define PFO_LOOP_T0(PADCODE) for (uint64_t i = 0; i < ops; i++) {                 \
+        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);                            \
+        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T0);     \
+        PADCODE }
+#define PFO_LOOP_T1(PADCODE) for (uint64_t i = 0; i < ops; i++) {                 \
+        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);                            \
+        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T1);     \
+        PADCODE }
+#define DPAD_DISPATCH(LOOP)                                                        \
+    switch (t->pad) {                                                              \
+        case 0:  LOOP()                              break;                        \
+        case 8:  LOOP(DPAD8();)                      break;                        \
+        case 16: LOOP(DPAD8(); DPAD8();)             break;                        \
+        case 24: LOOP(DPAD8(); DPAD8(); DPAD8();)    break;                        \
+        case 32: LOOP(DPAD8(); DPAD8(); DPAD8(); DPAD8();) break;                  \
+        case 48: LOOP(DPAD8(); DPAD8(); DPAD8(); DPAD8(); DPAD8(); DPAD8();) break; \
+        default: fprintf(stderr, "-pad must be 0, 8, 16, 24, 32 or 48\n"); exit(1); \
+    }
+#define PAD_DISPATCH(LOOP)                                                         \
+    switch (t->pad) {                                                              \
+        case 0:  LOOP()                              break;                        \
+        case 8:  LOOP(PAD8();)                       break;                        \
+        case 16: LOOP(PAD8(); PAD8();)               break;                        \
+        case 24: LOOP(PAD8(); PAD8(); PAD8();)       break;                        \
+        case 32: LOOP(PAD8(); PAD8(); PAD8(); PAD8();) break;                      \
+        case 48: LOOP(PAD8(); PAD8(); PAD8(); PAD8(); PAD8(); PAD8();) break;      \
+        default: fprintf(stderr, "-pad must be 0, 8, 16, 24, 32 or 48\n"); exit(1); \
+    }
+
+// Worker Thread: Allocation, Binding, Initialization, and Reading/Writing
+void *mem_worker(void *arg) {
+    thread_arg_t *t = (thread_arg_t *)arg;
+
+    // Pin Thread strictly to the exact assigned CPU ID
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(t->cpu_id, &cpuset);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
+        perror("pthread_setaffinity_np failed");
+        pthread_exit(NULL);
+    }
+
+    // Delayed Allocation
+    t->buffer = mmap(NULL, t->chunk_size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
+    if (t->buffer == MAP_FAILED) {
+        perror("mmap failed");
+        pthread_exit(NULL);
+    }
+
+    unsigned long nodemask = t->mem_nodemask;
+    int mem_mode = (__builtin_popcountl(nodemask) > 1) ? MPOL_INTERLEAVE : MPOL_BIND;
+
+    if (mbind(t->buffer, t->chunk_size, mem_mode, &nodemask, sizeof(nodemask)*8, MPOL_MF_STRICT | MPOL_MF_MOVE) != 0) {
+        perror("mbind failed");
+        pthread_exit(NULL);
+    }
+
+    memset(t->buffer, 1, t->chunk_size);
+    if (t->inst_type == INST_MIMIC) {   // key array, allocated and touched before the timed region
+        uint64_t kn = t->stage >= 5 ? 838860 : 64;   // stage 5: dramblast's ~0.84 M 8 B keys per thread (the harness key partition), in DDR
+        int knode = getenv("MIMIC_KEY_NODE") ? atoi(getenv("MIMIC_KEY_NODE")) : 0;   // stage 5 key node (default DDR node 0; 2 = HBM)
+        t->mk = t->stage >= 5 ? numa_alloc_onnode((kn + 32) * 8, knode) : aligned_alloc(64, (kn + 32) * 8);
+        memset(t->mk, 1, (kn + 32) * 8);
+    }
+
+    // ==========================================
+    pthread_barrier_wait(&init_barrier);
+    pthread_barrier_wait(&start_barrier);
+    // ==========================================
+
+    // Variables required by the macros
+    uint64_t NUM_CACHELINES = t->chunk_size / 64;
+    uint64_t PREFETCH_AHEAD = t->lookahead;
+    uint64_t NEAR_AHEAD = t->near_dist;
+    uint64_t state_var = t->thread_id + 0xDEADBEEF; // Constant seed for stateless hash
+    uint64_t *workload = NULL; // Included just to satisfy the fallback macro compile branch if used
+
+    uint64_t ops = NUM_CACHELINES;
+    // BW_HOTLINES=N (power of 2): index only the first N lines (e.g. 256 = 16 KiB, L1-resident), same iteration count
+    { const char *h = getenv("BW_HOTLINES"); if (h && atol(h) > 0) NUM_CACHELINES = (uint64_t)atol(h); }
+    uint64_t local_dummy = 0;
+    // Decisions come from a hash seeded differently from the address hash, so
+    // the read/write mix does not correlate with which line is touched.
+    // Seeds far apart in the stream, so two threads never walk the same one.
+    uint64_t addr_seed = mix64((uint64_t)t->thread_id);
+    uint64_t decision_seed = mix64((uint64_t)t->thread_id ^ 0xA5A5A5A5A5A5A5A5ULL);
+    // Only a genuinely mixed setting needs a per-access decision.
+    const int need_decisions = (share_threshold > 0 && share_threshold < DECISION_SCALE)
+                            || (write_threshold > 0 && write_threshold < DECISION_SCALE);
+
+    // Start cycle counter
+    uint64_t start_tsc = __rdtsc();
+
+    // The Benchmark Loop
+    for (int iter = 0; iter < NUM_ITERATIONS; iter++) {
+        if (shared_buffer != NULL) {
+            // Shared mode. ops stays tied to -m, exactly as below, so the
+            // bandwidth accounting in main() is unchanged by sharing.
+            switch (t->inst_type) {
+                case INST_LOAD:          SHARED_SCALAR_LOOP(PF_NONE); break;
+                case INST_PREFETCH_T0:   SHARED_SCALAR_LOOP(PF_T0);   break;
+                case INST_PREFETCH_T1:   SHARED_SCALAR_LOOP(PF_T1);   break;
+                case INST_PREFETCH_T2:   SHARED_SCALAR_LOOP(PF_T2);   break;
+                case INST_PREFETCH_NTA:  SHARED_SCALAR_LOOP(PF_NTA);  break;
+                case INST_PREFETCH_W:    SHARED_SCALAR_LOOP(PF_W);    break;
+                // No NT variant of the shared loop: the shared path exists to make
+                // threads collide on the same lines, and an NT store's whole point is
+                // not to take ownership of a line. Behaves as the plain scalar loop.
+                case INST_NT_STORE:      SHARED_SCALAR_LOOP(PF_NONE); break;
+                case INST_PREFETCH_T1_AVX512:        // no prefetched shared variant
+                case INST_PREFETCH_T1_AVX512_HEAVY:
+                case INST_AVX512_LOAD:
+                    for (uint64_t i = 0; i < ops; i++) {
+                        uint64_t h = mix64(addr_seed + (uint64_t)i);
+                        uint64_t d = need_decisions
+                                   ? mix64(decision_seed + (uint64_t)i) : 0;
+                        SHARED_PICK(h, d, buf, idx);
+                        if ((int)(d & (DECISION_SCALE - 1)) < write_threshold) {
+                            __m512i write_vec = _mm512_set1_epi64(0xff);
+                            _mm512_storeu_si512((void *)&buf[idx * 8], write_vec);
+                        } else {
+                            __m512i vec = _mm512_loadu_si512((const void *)&buf[idx * 8]);
+                            local_dummy += _mm_cvtsi128_si32(_mm512_castsi512_si128(vec));
+                        }
+                    }
+                    break;
+            }
+            __asm__ volatile("" ::: "memory");
+            continue;
+        }
+
+        switch (t->inst_type) {
+            case INST_LOAD:
+                if (t->rw_mode == MODE_READ) {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        local_dummy += t->buffer[idx * 8];
+                    }
+                } else {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        t->buffer[idx * 8] = 0xff;
+                    }
+                }
+                break;
+
+            case INST_AVX512_LOAD:
+                if (t->rw_mode == MODE_READ) {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        __m512i vec = _mm512_loadu_si512((const void*)&t->buffer[idx * 8]);
+                        local_dummy += _mm_cvtsi128_si32(_mm512_castsi512_si128(vec));
+                    }
+                } else {
+                    __m512i write_vec = _mm512_set1_epi64(0xff);
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        _mm512_storeu_si512((void*)&t->buffer[idx * 8], write_vec);
+                    }
+                }
+                break;
+
+            case INST_PREFETCH_T1_AVX512:
+            case INST_PREFETCH_T1_AVX512_HEAVY: {
+                const int heavy = (t->inst_type == INST_PREFETCH_T1_AVX512_HEAVY);
+                if (t->rw_mode == MODE_READ) {
+                    const __m512i key = _mm512_set1_epi64((long long)0x9e3779b97f4a7c15ULL);
+                    const __m512i mulk = _mm512_set1_epi64(0x100000001b3LL);
+                    __m512i acc = _mm512_setzero_si512();
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T1);
+                        __m512i vec = _mm512_loadu_si512((const void*)&t->buffer[idx * 8]);
+                        __mmask8 m = _mm512_mask_cmpeq_epu64_mask(0x55, vec, key);
+                        local_dummy += _mm_popcnt_u32(m);
+                        if (heavy) {
+                            __m512i v = _mm512_mullo_epi64(vec, mulk);
+                            v = _mm512_mullo_epi64(v, vec);   // operands depend on vec so
+                            v = _mm512_mullo_epi64(v, vec);   // gcc cannot fold to one multiply
+                            acc = _mm512_xor_si512(acc, v);
+                        }
+                    }
+                    local_dummy += _mm_cvtsi128_si64(_mm512_castsi512_si128(acc));
+                } else {
+                    __m512i write_vec = _mm512_set1_epi64(0xff);
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T1);
+                        _mm512_storeu_si512((void*)&t->buffer[idx * 8], write_vec);
+                    }
+                }
+                break;
+            }
+
+            case INST_PREFETCH_T1_DPAD: {
+                if (t->rw_mode != MODE_READ) { fprintf(stderr, "t1dpad is read-mode only\n"); exit(1); }
+                DPAD_DISPATCH(T1DPAD_LOOP)
+                break;
+            }
+
+            case INST_MIMIC: {
+                uint64_t p0 = 1, p1 = 2, p2 = 3, p3 = 4, p4 = 5, p5 = 6, p6 = 7, p7 = 8;
+                if (t->rw_mode != MODE_READ) { fprintf(stderr, "mimic is read-mode only\n"); exit(1); }
+                __m512i macc = _mm512_setzero_si512();
+                uint64_t *res = aligned_alloc(64, 64 * 16), *ring = aligned_alloc(64, 64 * 32);
+                uint64_t ro = 0, ki = 0;
+                uint64_t kn = t->stage >= 5 ? 838860 : 64;
+                uint64_t *kbase = t->mk;
+                memset(res, 0, 64 * 16); memset(ring, 0, 64 * 32);
+                switch (t->stage) {
+                    case 1: PAD_DISPATCH(MIMIC_S1) break;
+                    case 2: PAD_DISPATCH(MIMIC_S2) break;
+                    case 3: PAD_DISPATCH(MIMIC_S3) break;
+                    case 4: case 5: PAD_DISPATCH(MIMIC_S4) break;
+                    default: fprintf(stderr, "-stage must be 1..5\n"); exit(1);
+                }
+                local_dummy += p0 ^ p1 ^ p2 ^ p3 ^ p4 ^ p5 ^ p6 ^ p7 ^ (uint64_t)_mm512_reduce_add_epi64(macc) ^ res[1] ^ ring[2];
+                break;
+            }
+
+            case INST_PREFETCH_T1_PAD:
+            case INST_PREFETCH_DOUBLE: {
+                uint64_t p0 = 1, p1 = 2, p2 = 3, p3 = 4, p4 = 5, p5 = 6, p6 = 7, p7 = 8;
+                if (t->rw_mode != MODE_READ) { fprintf(stderr, "t1pad/double are read-mode only\n"); exit(1); }
+                if (t->inst_type == INST_PREFETCH_DOUBLE) { PAD_DISPATCH(DOUBLE_LOOP) }
+                else { PAD_DISPATCH(T1PAD_LOOP) }
+                local_dummy += p0 ^ p1 ^ p2 ^ p3 ^ p4 ^ p5 ^ p6 ^ p7;
+                break;
+            }
+
+            case INST_PREFETCH_T0:
+                if (t->rw_mode == MODE_READ && pf_only) {
+                    uint64_t dx = 0;
+                    DPAD_DISPATCH(PFO_LOOP_T0)
+                    local_dummy += dx;
+                } else if (t->rw_mode == MODE_READ) {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T0);
+                        local_dummy += t->buffer[idx * 8];
+                    }
+                } else {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T0);
+                        t->buffer[idx * 8] = 0xff;
+                    }
+                }
+                break;
+
+            case INST_PREFETCH_T1:
+                if (t->rw_mode == MODE_READ && pf_only) {
+                    uint64_t dx = 0;
+                    DPAD_DISPATCH(PFO_LOOP_T1)
+                    local_dummy += dx;
+                } else if (t->rw_mode == MODE_READ) {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T1);
+                        local_dummy += t->buffer[idx * 8];
+                    }
+                } else {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T1);
+                        t->buffer[idx * 8] = 0xff;
+                    }
+                }
+                break;
+
+            case INST_PREFETCH_T2:
+                if (t->rw_mode == MODE_READ) {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T2);
+                        local_dummy += t->buffer[idx * 8];
+                    }
+                } else {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_T2);
+                        t->buffer[idx * 8] = 0xff;
+                    }
+                }
+                break;
+
+            case INST_PREFETCH_NTA:
+                if (t->rw_mode == MODE_READ) {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_NTA);
+                        local_dummy += t->buffer[idx * 8];
+                    }
+                } else {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        _mm_prefetch((const char*)&t->buffer[idx_lookahead * 8], _MM_HINT_NTA);
+                        t->buffer[idx * 8] = 0xff;
+                    }
+                }
+                break;
+
+            case INST_PREFETCH_W:
+                if (t->rw_mode == MODE_READ) {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        __builtin_prefetch((const void*)&t->buffer[idx_lookahead * 8], 1, 3);
+                        local_dummy += t->buffer[idx * 8];
+                    }
+                } else {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        GET_LOOKAHEAD_IDX(idx_lookahead, i, state_var);
+                        __builtin_prefetch((const void*)&t->buffer[idx_lookahead * 8], 1, 3);
+                        t->buffer[idx * 8] = 0xff;
+                    }
+                }
+                break;
+
+            case INST_NT_STORE:
+                if (t->rw_mode == MODE_READ) {
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        local_dummy += t->buffer[idx * 8];
+                    }
+                } else {
+                    // Writes the whole 64 B line, which is what lets the write-combining
+                    // buffer retire it without ever fetching the line.
+                    __m512i nt_vec = _mm512_set1_epi64(0xff);
+                    for (uint64_t i = 0; i < ops; i++) {
+                        GET_IDX(idx, i, state_var);
+                        _mm512_stream_si512((void*)&t->buffer[idx * 8], nt_vec);
+                    }
+                    _mm_sfence();
+                }
+                break;
+        }
+        // Forces the compiler to forget all cached memory state, preventing loop hoisting!
+        __asm__ volatile("" ::: "memory");
+    }
+
+    // Stop cycle counter and record
+    uint64_t end_tsc = __rdtsc();
+    t->elapsed_cycles = end_tsc - start_tsc;
+    roi_stop();
+
+    if (t->rw_mode == MODE_READ) {
+        __sync_fetch_and_add(&global_sink, local_dummy);
+    }
+
+    // ==========================================
+    pthread_barrier_wait(&end_barrier);
+    // ==========================================
+
+    munmap(t->buffer, t->chunk_size);
+    pthread_exit(NULL);
+}
+
+int main(int argc, char *argv[]) {
+    // The collectors interleave this program's markers with perf's interval
+    // lines in one file, and parse what falls between them. Block buffering
+    // would flush every marker at exit, leaving nothing in between, so the
+    // markers are line buffered here rather than relying on the caller
+    // wrapping us in stdbuf.
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    pf_only = getenv("BW_PFONLY") && atoi(getenv("BW_PFONLY"));
+    if (pf_only) printf("BW_PFONLY: prefetch only, no demand load\n");
+    if (getenv("PERF_CTL") && getenv("PERF_ACK")) {
+        // colon-separated lists, one ctl/ack pair per perf process
+        char *cl = strdup(getenv("PERF_CTL")), *al = strdup(getenv("PERF_ACK")), *s1, *s2;
+        char *c = strtok_r(cl, ":", &s1), *a = strtok_r(al, ":", &s2);
+        while (c && a && n_perf < 4) {
+            ctl_fds[n_perf] = open(c, O_WRONLY); ack_fds[n_perf] = open(a, O_RDONLY);
+            if (ctl_fds[n_perf] < 0 || ack_fds[n_perf] < 0) { perror("PERF_CTL/PERF_ACK"); return 1; }
+            n_perf++; c = strtok_r(NULL, ":", &s1); a = strtok_r(NULL, ":", &s2);
+        }
+        perf_ctl_fd = ctl_fds[0]; perf_ack_fd = ack_fds[0];
+    }
+
+    if (numa_available() < 0) {
+        fprintf(stderr, "Error: NUMA support is not available.\n");
+        return -1;
+    }
+
+    size_t raw_per_thread_size = 0;
+    char *pattern_str = NULL;
+    inst_type_t inst = INST_LOAD;
+    rw_mode_t rw_mode = MODE_READ;
+    uint64_t lookahead = 32;
+    uint64_t near_dist = 8;   // -near: the double mode's prefetcht0 distance
+    int pad = 0;              // -pad: extra ALU instructions per line (t1pad, double)
+    int stage = 1;            // -stage: mimic build-up stage 1..5
+    double cpu_freq_ghz = 0.0;
+    int share_pct = 100;
+    int write_pct = -1; // -1 = follow -mode, which is the pre-existing behaviour
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) raw_per_thread_size = parse_size(argv[++i]);
+        else if (strcmp(argv[i], "-pattern") == 0 && i + 1 < argc) pattern_str = argv[++i];
+        else if (strcmp(argv[i], "-freq") == 0 && i + 1 < argc) cpu_freq_ghz = strtod(argv[++i], NULL);
+        else if (strcmp(argv[i], "-mode") == 0 && i + 1 < argc) {
+            i++;
+            if (strcmp(argv[i], "w") == 0 || strcmp(argv[i], "W") == 0) rw_mode = MODE_WRITE;
+            else rw_mode = MODE_READ;
+        }
+        else if (strcmp(argv[i], "-inst") == 0 && i + 1 < argc) {
+            i++;
+            if (strcmp(argv[i], "load") == 0) inst = INST_LOAD;
+            else if (strcmp(argv[i], "avx512") == 0) inst = INST_AVX512_LOAD;
+            else if (strcmp(argv[i], "t0") == 0) inst = INST_PREFETCH_T0;
+            else if (strcmp(argv[i], "t1") == 0) inst = INST_PREFETCH_T1;
+            else if (strcmp(argv[i], "t1avx512") == 0) inst = INST_PREFETCH_T1_AVX512;
+            else if (strcmp(argv[i], "t1pad") == 0) inst = INST_PREFETCH_T1_PAD;
+            else if (strcmp(argv[i], "t1dpad") == 0) inst = INST_PREFETCH_T1_DPAD;
+            else if (strcmp(argv[i], "double") == 0) inst = INST_PREFETCH_DOUBLE;
+            else if (strcmp(argv[i], "mimic") == 0) inst = INST_MIMIC;
+            else if (strcmp(argv[i], "t1avx512heavy") == 0) inst = INST_PREFETCH_T1_AVX512_HEAVY;
+            else if (strcmp(argv[i], "t2") == 0) inst = INST_PREFETCH_T2;
+            else if (strcmp(argv[i], "nta") == 0) inst = INST_PREFETCH_NTA;
+            else if (strcmp(argv[i], "prefetchw") == 0) inst = INST_PREFETCH_W;
+            else if (strcmp(argv[i], "ntstore") == 0) inst = INST_NT_STORE;
+            else { fprintf(stderr, "Unknown instruction type: %s\n", argv[i]); return -1; }
+        }
+        else if (strcmp(argv[i], "-lookahead") == 0 && i + 1 < argc) lookahead = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-near") == 0 && i + 1 < argc) near_dist = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-pad") == 0 && i + 1 < argc) pad = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-stage") == 0 && i + 1 < argc) stage = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-shared") == 0 && i + 1 < argc) shared_size = parse_size(argv[++i]);
+        else if (strcmp(argv[i], "-shared-nodes") == 0 && i + 1 < argc) shared_nodemask = parse_node_mask(argv[++i]);
+        else if (strcmp(argv[i], "-share") == 0 && i + 1 < argc) share_pct = atoi(argv[++i]);
+        else if (strcmp(argv[i], "-mix") == 0 && i + 1 < argc) {
+            // "-mix w:30" (30% stores) or plain "-mix 30"
+            const char *v = argv[++i];
+            if (v[0] == 'w' && v[1] == ':') v += 2;
+            write_pct = atoi(v);
+        }
+    }
+
+    if (share_pct < 0 || share_pct > 100) {
+        fprintf(stderr, "Error: -share must be 0..100\n");
+        return -1;
+    }
+    if (write_pct > 100) {
+        fprintf(stderr, "Error: -mix must be 0..100\n");
+        return -1;
+    }
+    // Without -mix the store fraction is all-or-nothing, which is what -mode
+    // has always meant.
+    if (write_pct < 0) write_pct = (rw_mode == MODE_WRITE) ? 100 : 0;
+    share_threshold = (int)((long)share_pct * DECISION_SCALE / 100);
+    write_threshold = (int)((long)write_pct * DECISION_SCALE / 100);
+
+#if !defined(RANDOM)
+    if (shared_size > 0) {
+        // The shared path hashes its own indices, so it stays random even in a
+        // binary built for sequential access. Say so rather than let the
+        // summary's "Mode: SEQUENTIAL" line imply otherwise.
+        printf("Note: -shared always indexes randomly, including in this "
+               "non-RANDOM build\n");
+    }
+#endif
+    if (shared_size > 0 && shared_nodemask == 0) {
+        fprintf(stderr, "Error: -shared needs -shared-nodes (e.g. -shared-nodes 2,3)\n");
+        return -1;
+    }
+    if (shared_size == 0 && (share_pct != 100 || write_pct != ((rw_mode == MODE_WRITE) ? 100 : 0))) {
+        fprintf(stderr, "Note: -share/-mix only apply with -shared; ignoring them\n");
+    }
+
+    if (raw_per_thread_size == 0 || pattern_str == NULL || cpu_freq_ghz <= 0.0) {
+        fprintf(stderr, "Usage: %s -m <per_thread_size> -pattern \"n0a0,1t16...\" -freq <GHz> [-inst <load|avx512|t0|t1|t1avx512|t1avx512heavy|t1pad|t1dpad|double|t2|nta|prefetchw|ntstore>] [-pad N] [-near D] [-lookahead <lines>] [-mode <r|w>]\n"
+                        "       shared (overlapping) mode, for cross-socket coherence traffic:\n"
+                        "         [-shared <size>] [-shared-nodes <2|2,3|0-1>] [-share <0..100>] [-mix w:<0..100>]\n"
+                        "         -shared        one region every thread indexes at random, like a shared table\n"
+                        "         -shared-nodes  where it lives; one node binds, several interleave\n"
+                        "         -share         %% of accesses that go to it, rest to the thread's private chunk\n"
+                        "         -mix           %% of accesses that are stores (this is what drives invalidations)\n", argv[0]);
+        return -1;
+    }
+
+    int max_node = numa_max_node();
+    if (max_node >= MAX_NUMA_NODES) max_node = MAX_NUMA_NODES - 1;
+
+    int available_cpus[MAX_NUMA_NODES][MAX_CPUS_PER_NODE];
+    int next_cpu_idx[MAX_NUMA_NODES] = {0};
+    int total_cpus_in_node[MAX_NUMA_NODES] = {0};
+
+    for (int n = 0; n <= max_node; n++) {
+        struct bitmask *cpus = numa_allocate_cpumask();
+        if (numa_node_to_cpus(n, cpus) == 0) {
+            for (int c = 0; c < cpus->size; c++) {
+                if (numa_bitmask_isbitset(cpus, c)) {
+                    if (total_cpus_in_node[n] < MAX_CPUS_PER_NODE) {
+                        available_cpus[n][total_cpus_in_node[n]++] = c;
+                    }
+                }
+            }
+        }
+        numa_bitmask_free(cpus);
+    }
+
+    pattern_t patterns[MAX_PATTERNS];
+    int num_patterns = 0;
+    int total_threads = 0;
+
+    char *pattern_copy = strdup(pattern_str);
+    char *token = strtok(pattern_copy, " ");
+
+    while (token != NULL && num_patterns < MAX_PATTERNS) {
+        char *n_ptr = strchr(token, 'n');
+        char *a_ptr = strchr(token, 'a');
+        char *t_ptr = strchr(token, 't');
+
+        if (n_ptr && a_ptr && t_ptr && (n_ptr < a_ptr) && (a_ptr < t_ptr)) {
+            patterns[num_patterns].cpu_node = atoi(n_ptr + 1);
+            patterns[num_patterns].num_threads = atoi(t_ptr + 1);
+
+            // Extract the comma/dash-separated memory nodes between 'a' and 't'
+            char mem_str[64];
+            int len = t_ptr - (a_ptr + 1);
+            if (len >= sizeof(mem_str)) len = sizeof(mem_str) - 1;
+            strncpy(mem_str, a_ptr + 1, len);
+            mem_str[len] = '\0';
+
+            patterns[num_patterns].mem_nodemask = parse_node_mask(mem_str);
+            total_threads += patterns[num_patterns].num_threads;
+            num_patterns++;
+        }
+        token = strtok(NULL, " ");
+    }
+    free(pattern_copy);
+
+    if (num_patterns == 0) {
+        fprintf(stderr, "Error: Invalid pattern provided.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    pthread_barrier_init(&init_barrier, NULL, total_threads + 1);
+    pthread_barrier_init(&start_barrier, NULL, total_threads + 1);
+    pthread_barrier_init(&end_barrier, NULL, total_threads + 1);
+
+    pthread_t threads[256];
+    thread_arg_t thread_args[256];
+    int t_idx = 0;
+    size_t actual_total_allocated = 0;
+
+    // ---> POWER OF 2 & 2MB ALIGNMENT CLAMPING <---
+    size_t chunk_per_thread = HUGE_PAGE_SIZE;
+    while ((chunk_per_thread * 2) <= raw_per_thread_size) {
+        chunk_per_thread *= 2;
+    }
+
+    printf("Requested per-thread size : ~%zu MB\n", raw_per_thread_size / (1024*1024));
+    printf("Clamped per-thread size   : %zu MB (Power of 2 & 2MB Aligned)\n\n", chunk_per_thread / (1024*1024));
+
+    if (shared_size > 0) {
+        // Same power-of-two clamp as the private chunks: the index is masked,
+        // not divided.
+        size_t clamped = HUGE_PAGE_SIZE;
+        while ((clamped * 2) <= shared_size) clamped *= 2;
+        shared_size = clamped;
+
+        shared_buffer = mmap(NULL, shared_size, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB,
+                             -1, 0);
+        if (shared_buffer == MAP_FAILED) {
+            perror("mmap of shared region failed");
+            fprintf(stderr, "  (needs %zu MB of 2MB hugepages on nodes 0x%lx)\n",
+                    shared_size / (1024*1024), shared_nodemask);
+            exit(EXIT_FAILURE);
+        }
+
+        int mem_mode = (__builtin_popcountl(shared_nodemask) > 1) ? MPOL_INTERLEAVE : MPOL_BIND;
+        if (mbind(shared_buffer, shared_size, mem_mode, &shared_nodemask,
+                  sizeof(shared_nodemask) * 8, MPOL_MF_STRICT | MPOL_MF_MOVE) != 0) {
+            perror("mbind of shared region failed");
+            exit(EXIT_FAILURE);
+        }
+        // Fault it in here, once, so placement follows the policy above rather
+        // than whichever worker happens to touch a page first.
+        memset(shared_buffer, 1, shared_size);
+        shared_cacheline_mask = (shared_size / 64) - 1;
+
+        printf("Shared region             : %zu MB on nodes 0x%lx (%s), %d%% of accesses, %d%% stores\n\n",
+               shared_size / (1024*1024), shared_nodemask,
+               mem_mode == MPOL_INTERLEAVE ? "interleaved" : "bound",
+               share_pct, write_pct);
+    }
+
+    for (int p = 0; p < num_patterns; p++) {
+        for (int t = 0; t < patterns[p].num_threads; t++) {
+            int node = patterns[p].cpu_node;
+
+            if (next_cpu_idx[node] >= total_cpus_in_node[node]) {
+                fprintf(stderr, "Error: Not enough CPUs available on NUMA node %d!\n", node);
+                exit(EXIT_FAILURE);
+            }
+
+            int assigned_cpu_id = available_cpus[node][next_cpu_idx[node]++];
+
+            thread_args[t_idx].thread_id = t_idx;
+            thread_args[t_idx].cpu_id = assigned_cpu_id;
+            thread_args[t_idx].cpu_node = node;
+            thread_args[t_idx].mem_nodemask = patterns[p].mem_nodemask;
+            thread_args[t_idx].chunk_size = chunk_per_thread;
+            thread_args[t_idx].inst_type = inst;
+            thread_args[t_idx].rw_mode = rw_mode;
+            thread_args[t_idx].lookahead = lookahead;
+            thread_args[t_idx].near_dist = near_dist;
+            thread_args[t_idx].pad = pad;
+            thread_args[t_idx].stage = stage;
+            thread_args[t_idx].elapsed_cycles = 0; // Initialize cycles
+
+            actual_total_allocated += chunk_per_thread;
+
+            printf("Spawning Thread %d -> Pinned to CPU %d (Node %d), Target Memory Node Mask 0x%lx\n",
+                   t_idx, assigned_cpu_id, node, patterns[p].mem_nodemask);
+
+            pthread_create(&threads[t_idx], NULL, mem_worker, &thread_args[t_idx]);
+            t_idx++;
+        }
+    }
+
+    printf("\nSetup: Spawning %d threads.\n", total_threads);
+    printf("Total memory allocated across all threads: %zu MB.\n\n", actual_total_allocated / (1024*1024));
+
+    pthread_barrier_wait(&init_barrier);
+    printf("-> [1/2] All threads allocated, bound to correct NUMA masks, and pinned to cores.\n");
+
+    printf("Start perf collection\n");
+    // Start timing globally
+    pthread_barrier_wait(&start_barrier);
+    uint64_t main_start_tsc = __rdtsc();
+    if (perf_ctl_fd >= 0) { sleep(1); roi_start(); }
+
+    // Wait for all threads to finish
+    pthread_barrier_wait(&end_barrier);
+    uint64_t main_end_tsc = __rdtsc();
+
+    for (int i = 0; i < total_threads; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    printf("End perf collection\n");
+    if (perf_ctl_fd >= 0) printf("ROI seconds     : %.6f (state %d)\n", roi_state == 2 ? roi_t1 - roi_t0 : -1.0, roi_state);
+
+    uint64_t elapsed_tsc = main_end_tsc - main_start_tsc;
+    // Calculate execution time based on CPU frequency provided by the user (Hz = GHz * 1e9)
+    double time_taken = (double)elapsed_tsc / (cpu_freq_ghz * 1e9);
+
+    size_t total_bytes_processed = actual_total_allocated * NUM_ITERATIONS;
+    double gb_processed = (double)total_bytes_processed / (1024.0 * 1024.0 * 1024.0);
+    double bandwidth = gb_processed / time_taken;
+
+    printf("\n============================================\n");
+    printf("Configuration   : Inst: %d | Lookahead: %lu | Mode: %s\n", inst, lookahead, rw_mode == MODE_READ ? "READ" : "WRITE");
+#if defined(RANDOM)
+    printf("Mode            : RANDOM (CRC32 Stateless Hash)\n");
+#elif defined(SEQUENTIAL) || defined(SEQUANTIAL)
+    printf("Mode            : SEQUENTIAL\n");
+#else
+    printf("Mode            : CUSTOM ARRAY\n");
+#endif
+    if (shared_size > 0) {
+        printf("Shared region   : %zu MB on nodes 0x%lx | share %d%% | stores %d%%\n",
+               shared_size / (1024*1024), shared_nodemask, share_pct, write_pct);
+    }
+    printf("Total Data Proc : %.2f GB\n", gb_processed);
+    printf("Elapsed Cycles  : %lu\n", elapsed_tsc);
+    printf("Time Taken      : %.4f seconds (based on %.2f GHz)\n", time_taken, cpu_freq_ghz);
+    printf("Bandwidth       : %.2f GB/s\n", bandwidth);
+
+    // Aggregate bandwidth hides the point of the shared mode: the two packages
+    // pay different prices for the same line. Break the cost out per cpu node.
+    {
+        uint64_t ops_per_thread = (chunk_per_thread / 64) * NUM_ITERATIONS;
+        printf("--------------------------------------------\n");
+        printf("Cycles per access, by cpu node:\n");
+        for (int n = 0; n <= max_node; n++) {
+            double sum_cpo = 0.0;
+            int count = 0;
+            for (int i = 0; i < total_threads; i++) {
+                if (thread_args[i].cpu_node != n) continue;
+                sum_cpo += (double)thread_args[i].elapsed_cycles / ops_per_thread;
+                count++;
+            }
+            if (count == 0) continue;
+            printf("  node %-3d : %7.2f cycles/access  (%d threads)\n",
+                   n, sum_cpo / count, count);
+        }
+    }
+    // if (rw_mode == MODE_READ) {
+    //     printf("dummy value     : %lu\n", global_sink);
+    // }
+
+    // printf("--------------------------------------------\n");
+    // printf("Cycles Per Operation (per thread):\n");
+    // uint64_t total_ops_per_thread = (chunk_per_thread / 64) * NUM_ITERATIONS;
+    // double aggr_cpo = 0;
+    // for (int i = 0; i < total_threads; i++) {
+    //     double cycles_per_op = (double)thread_args[i].elapsed_cycles / total_ops_per_thread;
+    //     printf("  Thread %2d (CPU %3d) : %7.2f cycles/op\n",
+    //            thread_args[i].thread_id, thread_args[i].cpu_id, cycles_per_op);
+    //     aggr_cpo += cycles_per_op;
+    // }
+    // printf("============================================\n");
+    // printf("Average cycle per operation: %.2f cycles/op\n", aggr_cpo/total_threads);
+    // printf("Predicted peak bandwidth: %.2f GB/s\n", (double) cpu_freq_ghz * 64 * total_threads * total_threads / aggr_cpo);
+
+    if (shared_buffer != NULL) munmap(shared_buffer, shared_size);
+
+    pthread_barrier_destroy(&init_barrier);
+    pthread_barrier_destroy(&start_barrier);
+    pthread_barrier_destroy(&end_barrier);
+    return 0;
+}

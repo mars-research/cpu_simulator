@@ -1,0 +1,24 @@
+BW_PFONLY: prefetch only, no demand load
+Requested per-thread size : ~1024 MB
+Clamped per-thread size   : 1024 MB (Power of 2 & 2MB Aligned)
+
+Spawning Thread 0 -> Pinned to CPU 0 (Node 0), Target Memory Node Mask 0x4
+
+Setup: Spawning 1 threads.
+Total memory allocated across all threads: 1024 MB.
+
+-> [1/2] All threads allocated, bound to correct NUMA masks, and pinned to cores.
+Start perf collection
+End perf collection
+ROI seconds     : 2.302940 (state 2)
+
+============================================
+Configuration   : Inst: 2 | Lookahead: 64 | Mode: READ
+Mode            : RANDOM (CRC32 Stateless Hash)
+Total Data Proc : 100.00 GB
+Elapsed Cycles  : 9062883514
+Time Taken      : 3.3566 seconds (based on 2.70 GHz)
+Bandwidth       : 29.79 GB/s
+--------------------------------------------
+Cycles per access, by cpu node:
+  node 0   :    5.40 cycles/access  (1 threads)

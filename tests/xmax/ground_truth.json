@@ -1,0 +1,101 @@
+{
+ "_doc": "Builds ground_truth.json from the raw perf logs in ../results/xmax/logs (Xeon Max 9462, 1 thread on 1 core,\nHBM, prefetchers off; see ../results/xmax/README.md). Per test: cycles per line and the counters per line / per\ncycle used to check the model. Lines = offcore_requests.data_rd (misses) or instructions / (8 + pad) (hot).",
+ "core_only": {
+  "0": {
+   "log": "fe_t0_p0_hot",
+   "alignmentOffset": 48,
+   "cycles_per_line": 2.175053036468532,
+   "uops_per_line": 7.006048961967583,
+   "dsb_uops_per_line": 6.996457468676469,
+   "mite_uops_per_line": 0.0054652238751710935,
+   "lsd_uops_per_line": 0.0
+  },
+  "8": {
+   "log": "fe_t0_p8_hot",
+   "alignmentOffset": 48,
+   "cycles_per_line": 3.5872363496920476,
+   "uops_per_line": 15.037999480078218,
+   "dsb_uops_per_line": 14.994232579557284,
+   "mite_uops_per_line": 0.007645416452367286,
+   "lsd_uops_per_line": 0.0
+  },
+  "16": {
+   "log": "fe_t0_p16_hot",
+   "alignmentOffset": 16,
+   "cycles_per_line": 5.3601913403954375,
+   "uops_per_line": 23.03215171412605,
+   "dsb_uops_per_line": 22.991330910977755,
+   "mite_uops_per_line": 0.011015821081689105,
+   "lsd_uops_per_line": 0.0
+  },
+  "24": {
+   "log": "fe_t0_p24_hot",
+   "alignmentOffset": 8,
+   "cycles_per_line": 7.0863256398806085,
+   "uops_per_line": 31.03521335343643,
+   "dsb_uops_per_line": 30.988097188498628,
+   "mite_uops_per_line": 0.014331458977649335,
+   "lsd_uops_per_line": 0.0
+  },
+  "32": {
+   "log": "fe_t0_p32_hot",
+   "alignmentOffset": 32,
+   "cycles_per_line": 8.588312677441285,
+   "uops_per_line": 39.05030742460585,
+   "dsb_uops_per_line": 38.984724430732896,
+   "mite_uops_per_line": 0.018202977854322403,
+   "lsd_uops_per_line": 0.0
+  },
+  "48": {
+   "log": "fe_t0_p48_hot",
+   "alignmentOffset": 24,
+   "cycles_per_line": 12.065812331246343,
+   "uops_per_line": 55.08966679517214,
+   "dsb_uops_per_line": 54.977231373155014,
+   "mite_uops_per_line": 0.02711802421418866,
+   "lsd_uops_per_line": 0.0
+  }
+ },
+ "pfo_t0_misses": {
+  "0": {
+   "logs": [
+    "pfo_t0_1x1",
+    "pfohint_t0_1x1"
+   ],
+   "cycles_per_line": 11.125468491168542,
+   "U": 29.279761299718814,
+   "W": 325.7510617689577,
+   "fb_full_frac": 0.9321563015962896,
+   "xq_full_frac": 0.1527581640812129,
+   "p_hwpf": 0.8260864234886194,
+   "swpf": 0.1738194372882232,
+   "l1_fills_per_prefetch": 1.0007069614783897
+  },
+  "16": {
+   "logs": [
+    "pfo_t0_p16_1x1",
+    "pfohint_t0_p16_1x1"
+   ],
+   "cycles_per_line": 16.89027457472762,
+   "U": 19.131237521952254,
+   "W": 323.1318547001052,
+   "fb_full_frac": 0.8784321353028339,
+   "xq_full_frac": 6.629461736638114e-07,
+   "p_hwpf": 0.7300348289793811,
+   "swpf": 0.2699356030351257,
+   "l1_fills_per_prefetch": 1.001199467037572
+  },
+  "48": {
+   "logs": [
+    "pend_t0_p48_1x1",
+    "fbfull_t0_p48_1x1"
+   ],
+   "cycles_per_line": 22.204396899209627,
+   "U": 16.70256532440531,
+   "W": 370.79772570511807,
+   "fb_full_frac": 0.6531841497909526,
+   "p_hwpf": 0.5282136579563943,
+   "l1d_pend_miss_pending_per_cycle": 0.008104649557903371
+  }
+ }
+}

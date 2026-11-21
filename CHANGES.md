@@ -33,27 +33,48 @@ load as an L1 hit.
   final registers, memory-model statistics, and the uops table per round — `reportExecution`,
   `uiCA.py:2263`. Without `-state`, uiCA behaves as stock (every load an L1 hit).
 
-## 4. Memory-system model (`memsys.py`, used with `-state`)
-- **Addresses** come from the executed instance (`covers` / `addressOf`, `memsys.py:196`).
-- **Caches.** L1 / L2 / non-inclusive LLC, LRU, with lines in flight tracked so a later load merges
-  with an outstanding miss — `Cache` `:76`, `MemSystem` `:149`.
-- **Miss handling as queues.** Fill buffers (16) and L2 misses (48) are server pools
-  (`SlotResource` `:112`). Each request type (load, prefetcht0, prefetcht2) occupies a fill buffer
-  for its own fitted time (`fbServiceTime`, `:64`); then the LLC/DRAM latency and DRAM bandwidth
-  apply — `access()` `:229`. Parameters are in `PRESETS` (`:51`).
-- **Hook into uiCA.** At dispatch, a load asks the model when its data is ready; if it needs a fill
-  buffer and none is free, it stays in the scheduler and retries — `uiCA.py:1037`, `:1070`. Data
-  readiness feeds the normal dependency logic — `uiCA.py:143`.
-- **Optional rule (off by default):** a miss that finds every fill buffer busy goes to L2 without
-  one (`fbBusyBypass`, `:59`). Hardware counters show this happens, but on its own it fits worse
-  (14.9 % vs 6.7 % mean error).
+## 4. Memory-system model (`memsys.py`, used with `-state`) — rewritten 2026-11-20 for the Xeon Max
+The first model (fitted per-request-type FB service times `fbServiceTime`, `EMR_d760` / `XMAX_hbm_pool` presets,
+uncore credit pool, optional `fbBusyBypass`) is removed: it computed each request's timing in one call at dispatch,
+so it could not express "a request that finds the FBs full goes out anyway and its uop waits in the core for an
+FB", nor any FB arbitration order. Measured on the Xeon Max with prefetchers off (`tests/results/xmax/README.md`):
+every prefetcht0 is counted either as l2_rqsts.swpf_miss or l2_rqsts.hwpf_miss (sum 1.000) and every one fills
+L1 (l1d.replacement 1.001), so the overflowed ones (hwpf, 53-83 %) are sent without an FB and take one later.
+- **Cycle-driven.** `access()` returns a `Req`; the model resolves it later. uiCA calls `memSys.tick(clock)` /
+  `memSys.endCycle(clock)` every cycle; a uop with an unresolved request does not finish and its result is not
+  ready (`processPendingUops`, `RenamedOperand.getReadyCycle`) — it stays in the ROB and load buffer.
+- **Request path** (module docstring): FB free -> takes it ("direct"); else, if fewer than `nOverflow` overflowed
+  requests are out, the request goes to the L2 at once without an FB ("overflow", = hwpf) and the uop waits for
+  an FB; else the uop waits without sending ("wait"; sent when granted). At the L2: hit, or an XQ entry (`nXQ`,
+  held until the data is back in L2, `memLat` / `llcLat`); an overflowed prefetcht1/t2 that finds the XQ full is
+  dropped. Data in L1 = max(data in L2, FB grant) + `l2ToL1`.
+- **FB hold.** ld / t0: until the data is in L1. t1 / t2: direct until the data is in L2 (`t2DirectHold`),
+  overflowed `t2OverflowHold` cycles after the grant. A prefetch completes 1 cycle after its FB grant.
+- **FB arbitration** `fbArb`: `old` (waiting requests first, oldest first) or `new` (requests dispatched in the
+  cycle first).
+- **Statistics** (`summary`): per kind p (overflow share), H_d / H_o (FB hold, direct / overflowed), k (FB wait
+  of overflowed uops), H; fb_full, fb_wait (cf. l1d_pend_miss.fb_full), xq_full (cf. xq.full_cycles),
+  U / W (cf. offcore_requests_outstanding.data_rd / offcore_requests.data_rd).
+- **Preset** `XMAX_hbm`: one thread on one core, `memLat` 325 cycles (measured W at 1 core), 16 FBs, `nXQ` 36.
+- The d760 suite in `tests/` (`run_uica.py`, `fit_fb.py`, the `EMR_d760` states) used the removed presets and
+  does not run against this model.
 
 ## 5. Load/store queue
 - Load buffer (192) and store buffer (114) on EMR; issue stalls when either is full; stores leave
   the buffer after retirement — `LoadStoreQueue`, `uiCA.py:866`, issue check `:489`.
 - Store-to-load forwarding by concrete address — `uiCA.py:179`.
 
-## 6. Tests and calibration (`tests/`, see `tests/README.md`)
+## 6. Front end / rename on Golden Cove, calibrated on Xeon Max 9462 (2026-11-20)
+Data: `tests/results/xmax/README.md` §1 (L1-resident prefetch + dependent-add loop, pads 0-48, front-end counters).
+- `LSDEnabled = False` for EMR: lsd.uops = 0 and idq.dsb_uops = all uops on the real loop.
+- `DSBWidth = 6` (was 8) and new `DSBTakenBranchEndsCycle = True`: the DSB delivers nothing after a taken branch
+  in the same cycle (`DSB.cycle`). The 7-uop loop takes 2.18 cycles (uiCA before: 1.25).
+- New `renameExecWidth` (EMR: 4; may be fractional, token bucket): instructions executed at rename (0 uops in
+  uops.info: add/sub/inc/dec reg, imm; lea) per cycle (`Renamer.cycle`). Measured: 0.206 cycles per dependent
+  `add reg, 1`.
+- Result: mean error 7.5 % over pads 0-48 (before ~30 %); remaining: ~0.2-0.6 cycles per iteration unexplained.
+
+## 7. Tests and calibration (d760) (`tests/`, see `tests/README.md`)
 - 20 short kernels (pointer chases, parallel misses, prefetch-then-load, request-type mixes) measured
   natively on the d760 (`measure.py` → `ground_truth.json`) and simulated from states set up the way
   the native harness sets up memory (`make_states.py` → `states/`, `run_uica.py`).
@@ -63,6 +84,11 @@ load as an L1 hit.
 - Fitting: `fit_fb.py`. Hardware counter survey: `results/counter_survey.md`.
 
 ## Status
+Xeon Max (2026-11-20, `tests/results/xmax/README.md`): core-only loop 7.5 % mean error; prefetch-only t0 with
+misses: best mean error 14 % (cycles/line and U over pads 0/16/48, `nOverflow` 12-16); the model's FBs are busy
+every cycle and its overflow share rises with pad, while the measured ones fall — open.
+
+d760 (first model, removed):
 Mean error 6.8 % over the 20 tests (`run_uica.py`). Largest open gaps: prefetch then load of the
 same line (`pf_t2`, −24 %; `pf_t0`, −16 %) and many parallel pointer chases (`mchase48`, +19 %).
 Not modelled: branch misprediction, stores missing the cache, several threads sharing DRAM. Unicorn

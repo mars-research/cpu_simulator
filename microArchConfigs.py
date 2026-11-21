@@ -7,7 +7,8 @@ class MicroArchConfig:
                 preDecodeWidth=5, preDecodeBlockSize=16, predecodeDecodeDelay=3, issueDispatchDelay=5, DSB_MS_Stall=4, pop5CEndsDecodeGroup=True,
                 high8RenamedSeparately=True, movzxHigh8AliasCanBeEliminated=True, moveEliminationPipelineLength=2, moveEliminationGPRSlots=4,
                 moveEliminationSIMDSlots=4, moveEliminationGPRAllAliasesMustBeOverwritten=True, LSDEnabled=True, LSDUnrolling={}, fastPointerChasing=True,
-                slow256BitMemAcc=False, DSBBlockSize=32, simplePortAssignment=False, LBWidth=None, SBWidth=None, storeCommitWidth=1):
+                slow256BitMemAcc=False, DSBBlockSize=32, simplePortAssignment=False, LBWidth=None, SBWidth=None, storeCommitWidth=1,
+                renameExecWidth=None, DSBTakenBranchEndsCycle=False):
       self.name = name
       self.XEDName = XEDName # see obj/wkit/bin/xed -chip-check-list
       self.IQWidth = IQWidth # width of the instruction queue
@@ -35,6 +36,8 @@ class MicroArchConfig:
       self.moveEliminationSIMDSlots = moveEliminationSIMDSlots # the number of slots or 'unlimited'
       self.moveEliminationGPRAllAliasesMustBeOverwritten = moveEliminationGPRAllAliasesMustBeOverwritten
       self.LSDEnabled = LSDEnabled
+      self.renameExecWidth = renameExecWidth # max. instructions executed at rename per cycle (None: no limit)
+      self.DSBTakenBranchEndsCycle = DSBTakenBranchEndsCycle # the DSB delivers nothing after a taken branch in the same cycle
       self.LSDUnrolling = LSDUnrolling
       self.fastPointerChasing = fastPointerChasing
       self.slow256BitMemAcc = slow256BitMemAcc # 256-bit memory load/store uops block the load/store units twice
@@ -194,6 +197,12 @@ MicroArchConfigs['EMR'].fastPointerChasing = False
 MicroArchConfigs['EMR'].LBWidth = 192       # Golden Cove load buffer
 MicroArchConfigs['EMR'].SBWidth = 114       # Golden Cove store buffer
 MicroArchConfigs['EMR'].storeCommitWidth = 2
+# Front end / rename, calibrated on Xeon Max 9462 (Sapphire Rapids, same Golden Cove core) with an L1-resident
+# prefetch + dependent-add loop (CHANGES.md, 2026-11-20): every uop comes from the DSB (lsd.uops = 0, idq.mite_uops = 0)
+MicroArchConfigs['EMR'].LSDEnabled = False
+MicroArchConfigs['EMR'].DSBWidth = 6                 # uops per cycle from the DSB (was 8)
+MicroArchConfigs['EMR'].DSBTakenBranchEndsCycle = True
+MicroArchConfigs['EMR'].renameExecWidth = 4          # instructions executed at rename (add reg, imm ...) per cycle
 
 MicroArchConfigs['CLX_SimplePorts'] = copy.deepcopy(MicroArchConfigs['CLX'])
 MicroArchConfigs['CLX_SimplePorts'].simplePortAssignment = True
